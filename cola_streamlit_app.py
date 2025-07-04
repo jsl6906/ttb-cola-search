@@ -4,13 +4,51 @@ import os
 import random
 import duckdb
 import json
+from dotenv import load_dotenv
 
-# Path to cola_data.json
-COLA_DUCKDB_PATH = os.path.join(os.path.dirname(__file__), 'data/cola_data.duckdb')
+# Load environment variables from .env file
+load_dotenv()
+
+# MotherDuck database configuration
+# Set your MotherDuck token as an environment variable: MOTHERDUCK_TOKEN
+# Database format: md:<database_name> or md:<database_name>.<schema_name>
+MOTHERDUCK_DATABASE = os.getenv('MOTHERDUCK_DATABASE', 'md:cola_data')  # Default database name
+MOTHERDUCK_TOKEN = os.getenv('MOTHERDUCK_TOKEN')  # Required for authentication
 HIGHLIGHT_COLOR = "#00ff99"  # Color for highlighted terms
 IMAGE_INFO_HEADER_COLOR = "#00ff99"  # Color for image info headers
 DETAIL_URL = "https://ttbonline.gov/colasonline/viewColaDetails.do?action=publicDisplaySearchAdvanced&ttbid="
 IMAGES_URL = "https://ttbonline.gov/colasonline/viewColaDetails.do?action=publicFormDisplay&ttbid="
+
+def get_motherduck_connection():
+    """
+    Create and return a MotherDuck connection with proper error handling.
+    """
+    if not MOTHERDUCK_TOKEN:
+        st.error("MotherDuck token not found. Please set the MOTHERDUCK_TOKEN environment variable.")
+        st.info("You can get your token from the MotherDuck console at https://app.motherduck.com/")
+        st.stop()
+    
+    try:
+        # Connect to MotherDuck with token authentication
+        # Note: You can also use duckdb.connect() and then execute SET motherduck_token = 'token'
+        con = duckdb.connect(f"{MOTHERDUCK_DATABASE}?motherduck_token={MOTHERDUCK_TOKEN}")
+        
+        # Test the connection by running a simple query
+        con.execute("SELECT 1").fetchone()
+        return con
+        
+    except Exception as e:
+        st.error(f"Failed to connect to MotherDuck database: {str(e)}")
+        st.info(f"Trying to connect to: {MOTHERDUCK_DATABASE}")
+        st.info("Please check your MOTHERDUCK_TOKEN and MOTHERDUCK_DATABASE environment variables.")
+        
+        # Show some debugging information
+        if "authentication" in str(e).lower() or "token" in str(e).lower():
+            st.error("Authentication failed. Please verify your MOTHERDUCK_TOKEN is correct.")
+        elif "database" in str(e).lower() or "not found" in str(e).lower():
+            st.error("Database not found. Please verify your MOTHERDUCK_DATABASE setting.")
+        
+        st.stop()
 
 def get_unique_values(cola_data, key):
     # Replace None or empty values with 'UNKNOWN' and ensure all are strings
@@ -30,7 +68,8 @@ def main():
         st.logo(logo_path, size="large")
     st.title('TTB COLA Data Explorer')
 
-    con = duckdb.connect(COLA_DUCKDB_PATH, read_only=True)
+    # Connect to MotherDuck database
+    con = get_motherduck_connection()
 
     # Sidebar filters
     st.sidebar.header('Filters')
@@ -184,11 +223,24 @@ def main():
             for img_idx, img in enumerate(c['images']):
                 cols = st.columns([1, 2])
                 with cols[0]:
-                    img_path = os.path.join(os.path.dirname(__file__), 'data', img.get('local_path', ''))
-                    if os.path.exists(img_path):
-                        st.image(img_path, caption=None, use_container_width='always', output_format='auto')
+                    # Handle both local paths and URLs for images
+                    local_path = img.get('local_path', '')
+                    if local_path.startswith('http://') or local_path.startswith('https://'):
+                        # URL-based image
+                        try:
+                            st.image(local_path, caption=None, use_container_width='always', output_format='auto')
+                        except Exception:
+                            st.write('(Image could not be loaded)')
                     else:
-                        st.write('(Image not found)')
+                        # Local file path
+                        img_path = os.path.join(os.path.dirname(__file__), 'data', local_path)
+                        if os.path.exists(img_path):
+                            st.image(img_path, caption=None, use_container_width='always', output_format='auto')
+                        else:
+                            st.write('(Image not found locally)')
+                            # Show the path for debugging
+                            if local_path:
+                                st.caption(f"Expected: {local_path}")
                 with cols[1]:
                     def small_conf(val):
                         try:
