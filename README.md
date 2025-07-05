@@ -44,7 +44,7 @@ uv run streamlit run cola_streamlit_app.py
 ### Environment Variables
 
 - `MOTHERDUCK_TOKEN`: Your MotherDuck authentication token (required)
-- `MOTHERDUCK_DATABASE`: Database connection string (default: `md:cola_data`)
+- `MOTHERDUCK_DATABASE`: Database connection string (default: `md:ttb_public_data`)
   - Format: `md:database_name` or `md:database_name.schema_name`
 
 ### Database Schema
@@ -73,17 +73,7 @@ The application supports both:
 - **Local images**: Stored in `data/` directory (legacy)
 - **URL-based images**: HTTP/HTTPS URLs stored in the `local_path` field
 
-### Troubleshooting
+#### Diagnostic Tools:
 
-1. **Connection Issues:**
-   - Verify your `MOTHERDUCK_TOKEN` is correct
-   - Check the `MOTHERDUCK_DATABASE` name format
-   - Ensure you have access permissions to the database
-
-2. **Missing Tables:**
-   - Run `uv run python test_motherduck.py` to check table existence
-   - Verify the database contains the expected schema
-
-3. **Image Loading:**
-   - Local images should be in the `data/` directory
-   - URL-based images require accessible HTTP/HTTPS endpoints
+- **Connection Test:** `uv run python test_motherduck.py`
+- **MotherDuck Console:** https://app.motherduck.com/

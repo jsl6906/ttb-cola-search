@@ -38,15 +38,29 @@ def get_motherduck_connection():
         return con
         
     except Exception as e:
-        st.error(f"Failed to connect to MotherDuck database: {str(e)}")
+        error_msg = str(e)
+        st.error(f"Failed to connect to MotherDuck database: {error_msg}")
         st.info(f"Trying to connect to: {MOTHERDUCK_DATABASE}")
-        st.info("Please check your MOTHERDUCK_TOKEN and MOTHERDUCK_DATABASE environment variables.")
         
-        # Show some debugging information
-        if "authentication" in str(e).lower() or "token" in str(e).lower():
-            st.error("Authentication failed. Please verify your MOTHERDUCK_TOKEN is correct.")
-        elif "database" in str(e).lower() or "not found" in str(e).lower():
-            st.error("Database not found. Please verify your MOTHERDUCK_DATABASE setting.")
+        # Specific error handling for common issues
+        if "database aliases are not yet supported" in error_msg.lower():
+            st.error("🔍 **Database Alias Issue**: Your database uses aliases which aren't supported in MotherDuck workspace mode.")
+            st.info("**Solutions:**")
+            st.info("• Use the direct database name instead of an alias")
+            st.info("• Ensure all tables are in the same database") 
+            st.info("• Try a different MOTHERDUCK_DATABASE connection string")
+            st.info("• Contact MotherDuck support about workspace mode limitations")
+            
+        elif "authentication" in error_msg.lower() or "token" in error_msg.lower():
+            st.error("🔑 **Authentication Issue**: Please verify your MOTHERDUCK_TOKEN is correct and not expired.")
+            
+        elif "database" in error_msg.lower() and "not found" in error_msg.lower():
+            st.error("🗄️ **Database Not Found**: The specified database doesn't exist or you don't have access.")
+        
+        st.info("**General troubleshooting:**")
+        st.info("• Verify your MOTHERDUCK_TOKEN and MOTHERDUCK_DATABASE environment variables")
+        st.info("• Run `uv run python test_motherduck.py` for detailed diagnostics")
+        st.info("• Check the MotherDuck console for database availability")
         
         st.stop()
 
@@ -79,8 +93,8 @@ def main():
     has_analysis_only = st.sidebar.checkbox('Only COLAs with image analysis data', value=True)
 
     # Date range filter for completed_date
-    min_date = con.execute('SELECT MIN(completed_date) FROM colas WHERE completed_date IS NOT NULL').fetchone()[0]
-    max_date = con.execute('SELECT MAX(completed_date) FROM colas WHERE completed_date IS NOT NULL').fetchone()[0]
+    min_date = con.execute('SELECT MIN(completed_date) FROM cola_images.colas WHERE completed_date IS NOT NULL').fetchone()[0]
+    max_date = con.execute('SELECT MAX(completed_date) FROM cola_images.colas WHERE completed_date IS NOT NULL').fetchone()[0]
     if min_date and max_date:
         min_date = min_date.strftime('%Y-%m-%d') if hasattr(min_date, 'strftime') else str(min_date)
         max_date = max_date.strftime('%Y-%m-%d') if hasattr(max_date, 'strftime') else str(max_date)
@@ -93,9 +107,9 @@ def main():
         selected_start, selected_end = None, None
 
     # Query DuckDB for unique origin and class type options
-    origin_options = [row[0] if row[0] else 'UNKNOWN' for row in con.execute("SELECT DISTINCT COALESCE(origin, 'UNKNOWN') FROM colas").fetchall()]
+    origin_options = [row[0] if row[0] else 'UNKNOWN' for row in con.execute("SELECT DISTINCT COALESCE(origin, 'UNKNOWN') FROM cola_images.colas").fetchall()]
     origin_options = sorted(set(str(o) for o in origin_options))
-    class_type_options = [row[0] if row[0] else 'UNKNOWN' for row in con.execute("SELECT DISTINCT COALESCE(class_type, 'UNKNOWN') FROM colas").fetchall()]
+    class_type_options = [row[0] if row[0] else 'UNKNOWN' for row in con.execute("SELECT DISTINCT COALESCE(class_type, 'UNKNOWN') FROM cola_images.colas").fetchall()]
     class_type_options = sorted(set(str(c) for c in class_type_options))
     selected_origin = st.sidebar.multiselect('Origin', origin_options)
     selected_class_type = st.sidebar.multiselect('Class Type', class_type_options)
@@ -104,9 +118,9 @@ def main():
     where_clauses = []
     params = []
     if has_images_only:
-        where_clauses.append('(SELECT COUNT(1) FROM cola_images ci WHERE ci.cola_id = c.cola_id) > 0')
+        where_clauses.append('(SELECT COUNT(1) FROM cola_images.cola_images ci WHERE ci.cola_id = c.cola_id) > 0')
     if has_analysis_only:
-        where_clauses.append("EXISTS (SELECT 1 FROM cola_images ci LEFT JOIN cola_image_analysis cia ON ci.cola_id = cia.cola_id AND ci.file_name = cia.file_name WHERE ci.cola_id = c.cola_id AND cia.metadata IS NOT NULL AND TRIM(CAST(cia.metadata AS VARCHAR)) NOT IN ('', '""'))")
+        where_clauses.append("EXISTS (SELECT 1 FROM cola_images.cola_images ci LEFT JOIN cola_images.cola_image_analysis cia ON ci.cola_id = cia.cola_id AND ci.file_name = cia.file_name WHERE ci.cola_id = c.cola_id AND cia.metadata IS NOT NULL AND TRIM(CAST(cia.metadata AS VARCHAR)) NOT IN ('', '""'))")
     if selected_origin:
         where_clauses.append('COALESCE(c.origin, \'UNKNOWN\') IN (' + ','.join(['?' for _ in selected_origin]) + ')')
         params.extend(selected_origin)
@@ -122,8 +136,8 @@ def main():
                 'LOWER(COALESCE(c.fanciful_name, \'\')) LIKE ?',
                 'LOWER(COALESCE(c.permit_num, \'\')) LIKE ?',
                 'LOWER(COALESCE(c.serial_num, \'\')) LIKE ?',
-                "EXISTS (SELECT 1 FROM cola_images ci LEFT JOIN cola_image_analysis cia ON ci.cola_id = cia.cola_id AND ci.file_name = cia.file_name WHERE ci.cola_id = c.cola_id AND cia.metadata IS NOT NULL AND TRIM(CAST(cia.metadata AS VARCHAR)) NOT IN ('', '""') AND LOWER(CAST(cia.metadata AS VARCHAR)) LIKE ?)",
-                "EXISTS (SELECT 1 FROM cola_images ci LEFT JOIN image_analysis_items iai ON ci.cola_id = iai.cola_id AND ci.file_name = iai.file_name WHERE ci.cola_id = c.cola_id AND LOWER(COALESCE(iai.text, '')) LIKE ?)"
+                "EXISTS (SELECT 1 FROM cola_images.cola_images ci LEFT JOIN cola_images.cola_image_analysis cia ON ci.cola_id = cia.cola_id AND ci.file_name = cia.file_name WHERE ci.cola_id = c.cola_id AND cia.metadata IS NOT NULL AND TRIM(CAST(cia.metadata AS VARCHAR)) NOT IN ('', '""') AND LOWER(CAST(cia.metadata AS VARCHAR)) LIKE ?)",
+                "EXISTS (SELECT 1 FROM cola_images.cola_images ci LEFT JOIN cola_images.image_analysis_items iai ON ci.cola_id = iai.cola_id AND ci.file_name = iai.file_name WHERE ci.cola_id = c.cola_id AND LOWER(COALESCE(iai.text, '')) LIKE ?)"
 
             ]) +
         ')')
@@ -137,8 +151,8 @@ def main():
                 'LOWER(COALESCE(c.fanciful_name, \'\')) LIKE ?',
                 'LOWER(COALESCE(c.permit_num, \'\')) LIKE ?',
                 'LOWER(COALESCE(c.serial_num, \'\')) LIKE ?',
-                "EXISTS (SELECT 1 FROM cola_images ci LEFT JOIN cola_image_analysis cia ON ci.cola_id = cia.cola_id AND ci.file_name = cia.file_name WHERE ci.cola_id = c.cola_id AND cia.metadata IS NOT NULL AND TRIM(CAST(cia.metadata AS VARCHAR)) NOT IN ('', '""') AND LOWER(CAST(cia.metadata AS VARCHAR)) LIKE ?)",
-                "EXISTS (SELECT 1 FROM cola_images ci LEFT JOIN image_analysis_items iai ON ci.cola_id = iai.cola_id AND ci.file_name = iai.file_name WHERE ci.cola_id = c.cola_id AND LOWER(COALESCE(iai.text, '')) LIKE ?)"
+                "EXISTS (SELECT 1 FROM cola_images.cola_images ci LEFT JOIN cola_images.cola_image_analysis cia ON ci.cola_id = cia.cola_id AND ci.file_name = cia.file_name WHERE ci.cola_id = c.cola_id AND cia.metadata IS NOT NULL AND TRIM(CAST(cia.metadata AS VARCHAR)) NOT IN ('', '""') AND LOWER(CAST(cia.metadata AS VARCHAR)) LIKE ?)",
+                "EXISTS (SELECT 1 FROM cola_images.cola_images ci LEFT JOIN cola_images.image_analysis_items iai ON ci.cola_id = iai.cola_id AND ci.file_name = iai.file_name WHERE ci.cola_id = c.cola_id AND LOWER(COALESCE(iai.text, '')) LIKE ?)"
 
             ]) +
         ')')
@@ -153,7 +167,7 @@ def main():
         SELECT 
             c.*, 
             COALESCE(imgs.images_json, '[]') AS images
-        FROM colas c
+        FROM cola_images.colas c
         LEFT JOIN (
             SELECT 
                 cola_images.cola_id, 
@@ -170,13 +184,13 @@ def main():
                                 'model_confidence', iai.model_confidence,
                                 'bounding_box', iai.bounding_box
                             ))
-                            FROM image_analysis_items iai
+                            FROM cola_images.image_analysis_items iai
                             WHERE iai.cola_id = cola_images.cola_id AND iai.file_name = cola_images.file_name
                         )
                     )
                 ) AS images_json
-            FROM cola_images
-            LEFT JOIN cola_image_analysis cia
+            FROM cola_images.cola_images
+            LEFT JOIN cola_images.cola_image_analysis cia
                 ON cola_images.cola_id = cia.cola_id 
                 AND cola_images.file_name = cia.file_name
             GROUP BY cola_images.cola_id

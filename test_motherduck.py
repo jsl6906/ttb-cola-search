@@ -10,8 +10,7 @@ from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
-
-MOTHERDUCK_DATABASE = os.getenv('MOTHERDUCK_DATABASE', 'md:cola_data')
+MOTHERDUCK_DATABASE = os.getenv('MOTHERDUCK_DATABASE')
 MOTHERDUCK_TOKEN = os.getenv('MOTHERDUCK_TOKEN')
 
 def test_motherduck_connection():
@@ -26,7 +25,8 @@ def test_motherduck_connection():
     
     try:
         # Connect to MotherDuck
-        con = duckdb.connect(f"{MOTHERDUCK_DATABASE}?motherduck_token={MOTHERDUCK_TOKEN}")
+        #con = duckdb.connect(f"{MOTHERDUCK_DATABASE}?motherduck_token={MOTHERDUCK_TOKEN}")
+        con = duckdb.connect("md:ttb_public_data?motherduck_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6ImpzbDY5MDZAZ21haWwuY29tIiwic2Vzc2lvbiI6ImpzbDY5MDYuZ21haWwuY29tIiwicGF0IjoidXVzLUo0N0J3Q1lDUUZZZHFsVVZvTHN0Ym5tcEd0bHZQZzdqQVo1SUZTYyIsInVzZXJJZCI6IjEwODk5ZDdmLTUzZWMtNDFjMy04N2QxLWNmYmM4ZGY0MzBlOCIsImlzcyI6Im1kX3BhdCIsInJlYWRPbmx5IjpmYWxzZSwidG9rZW5UeXBlIjoicmVhZF93cml0ZSIsImlhdCI6MTc1MTY3NjIxNX0.h1bxU3sHnDs7Tr7fcxUBrsBAjaoxq26eh4oIWGo_RiQ")
         print("✓ Connected to MotherDuck successfully")
         
         # Test basic query
@@ -68,3 +68,12 @@ def test_motherduck_connection():
 
 if __name__ == "__main__":
     test_motherduck_connection()
+    # try:
+    #     print("Connecting to MotherDuck...")
+    #     #con = duckdb.connect("md:ttb_public_data?motherduck_token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJlbWFpbCI6ImpzbDY5MDZAZ21haWwuY29tIiwic2Vzc2lvbiI6ImpzbDY5MDYuZ21haWwuY29tIiwicGF0IjoidXVzLUo0N0J3Q1lDUUZZZHFsVVZvTHN0Ym5tcEd0bHZQZzdqQVo1SUZTYyIsInVzZXJJZCI6IjEwODk5ZDdmLTUzZWMtNDFjMy04N2QxLWNmYmM4ZGY0MzBlOCIsImlzcyI6Im1kX3BhdCIsInJlYWRPbmx5IjpmYWxzZSwidG9rZW5UeXBlIjoicmVhZF93cml0ZSIsImlhdCI6MTc1MTY3NjIxNX0.h1bxU3sHnDs7Tr7fcxUBrsBAjaoxq26eh4oIWGo_RiQ")
+    #     print(f"{MOTHERDUCK_DATABASE}?motherduck_token={MOTHERDUCK_TOKEN}")
+    #     print(os.getenv('MOTHERDUCK_DATABASE'))
+    #     con = duckdb.connect(f"{MOTHERDUCK_DATABASE}?motherduck_token={MOTHERDUCK_TOKEN}")
+    # except Exception as e:
+    #     print(f"❌ Error connecting to MotherDuck: {str(e)}")
+    # con.close()
