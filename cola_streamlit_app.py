@@ -91,10 +91,11 @@ def main():
     exclude_term = st.sidebar.text_input('Exclude phrase (optional)')
     has_images_only = st.sidebar.checkbox('Only COLAs with images', value=True)
     has_analysis_only = st.sidebar.checkbox('Only COLAs with image analysis data', value=True)
+    has_violations_only = st.sidebar.checkbox('Only COLAs with violations', value=False)
 
     # Date range filter for completed_date
-    min_date = con.execute('SELECT MIN(completed_date) FROM cola_images.colas WHERE completed_date IS NOT NULL').fetchone()[0]
-    max_date = con.execute('SELECT MAX(completed_date) FROM cola_images.colas WHERE completed_date IS NOT NULL').fetchone()[0]
+    min_date = con.execute('SELECT MIN(completed_date) from cola_images.colas WHERE completed_date IS NOT NULL').fetchone()[0]
+    max_date = con.execute('SELECT MAX(completed_date) from cola_images.colas WHERE completed_date IS NOT NULL').fetchone()[0]
     if min_date and max_date:
         min_date = min_date.strftime('%Y-%m-%d') if hasattr(min_date, 'strftime') else str(min_date)
         max_date = max_date.strftime('%Y-%m-%d') if hasattr(max_date, 'strftime') else str(max_date)
@@ -107,103 +108,190 @@ def main():
         selected_start, selected_end = None, None
 
     # Query DuckDB for unique origin and class type options
-    origin_options = [row[0] if row[0] else 'UNKNOWN' for row in con.execute("SELECT DISTINCT COALESCE(origin, 'UNKNOWN') FROM cola_images.colas").fetchall()]
+    origin_options = [row[0] if row[0] else 'UNKNOWN' for row in con.execute("SELECT DISTINCT COALESCE(origin, 'UNKNOWN') from cola_images.colas").fetchall()]
     origin_options = sorted(set(str(o) for o in origin_options))
-    class_type_options = [row[0] if row[0] else 'UNKNOWN' for row in con.execute("SELECT DISTINCT COALESCE(class_type, 'UNKNOWN') FROM cola_images.colas").fetchall()]
+    class_type_options = [row[0] if row[0] else 'UNKNOWN' for row in con.execute("SELECT DISTINCT COALESCE(class_type, 'UNKNOWN') from cola_images.colas").fetchall()]
     class_type_options = sorted(set(str(c) for c in class_type_options))
     selected_origin = st.sidebar.multiselect('Origin', origin_options)
     selected_class_type = st.sidebar.multiselect('Class Type', class_type_options)
 
-    # Build SQL WHERE clauses based on filters
+    # Build optimized query based on filters
+    # Start with base COLA query using vw_colas for better performance
+    base_query = "SELECT * FROM vw_colas c"
     where_clauses = []
     params = []
-    if has_images_only:
-        where_clauses.append('(SELECT COUNT(1) FROM vw_cola_images ci WHERE ci.cola_id = c.cola_id AND ci.public_url IS NOT NULL) > 0')
-    if has_analysis_only:
-        where_clauses.append("EXISTS (SELECT 1 FROM cola_images.cola_images ci LEFT JOIN cola_images.cola_image_analysis cia ON ci.cola_id = cia.cola_id AND ci.file_name = cia.file_name WHERE ci.cola_id = c.cola_id AND cia.metadata IS NOT NULL AND TRIM(CAST(cia.metadata AS VARCHAR)) NOT IN ('', '""'))")
+    
+    # Apply basic filters
     if selected_origin:
         where_clauses.append('COALESCE(c.origin, \'UNKNOWN\') IN (' + ','.join(['?' for _ in selected_origin]) + ')')
         params.extend(selected_origin)
     if selected_class_type:
         where_clauses.append('COALESCE(c.class_type, \'UNKNOWN\') IN (' + ','.join(['?' for _ in selected_class_type]) + ')')
         params.extend(selected_class_type)
-    if search_term:
-        term = f"%{search_term.lower()}%"
-        where_clauses.append('(' +
-            ' OR '.join([
-                'LOWER(CAST(c.cola_id AS VARCHAR)) LIKE ?',
-                'LOWER(COALESCE(c.brand_name, \'\')) LIKE ?',
-                'LOWER(COALESCE(c.fanciful_name, \'\')) LIKE ?',
-                'LOWER(COALESCE(c.permit_num, \'\')) LIKE ?',
-                'LOWER(COALESCE(c.serial_num, \'\')) LIKE ?',
-                "EXISTS (SELECT 1 FROM cola_images.cola_images ci LEFT JOIN cola_images.cola_image_analysis cia ON ci.cola_id = cia.cola_id AND ci.file_name = cia.file_name WHERE ci.cola_id = c.cola_id AND cia.metadata IS NOT NULL AND TRIM(CAST(cia.metadata AS VARCHAR)) NOT IN ('', '""') AND LOWER(CAST(cia.metadata AS VARCHAR)) LIKE ?)",
-                "EXISTS (SELECT 1 FROM cola_images.cola_images ci LEFT JOIN cola_images.image_analysis_items iai ON ci.cola_id = iai.cola_id AND ci.file_name = iai.file_name WHERE ci.cola_id = c.cola_id AND LOWER(COALESCE(iai.text, '')) LIKE ?)"
-
-            ]) +
-        ')')
-        params.extend([term]*7)
-    if exclude_term:
-        ex_term = f"%{exclude_term.lower()}%"
-        where_clauses.append('NOT (' +
-            ' OR '.join([
-                'LOWER(CAST(c.cola_id AS VARCHAR)) LIKE ?',
-                'LOWER(COALESCE(c.brand_name, \'\')) LIKE ?',
-                'LOWER(COALESCE(c.fanciful_name, \'\')) LIKE ?',
-                'LOWER(COALESCE(c.permit_num, \'\')) LIKE ?',
-                'LOWER(COALESCE(c.serial_num, \'\')) LIKE ?',
-                "EXISTS (SELECT 1 FROM cola_images.cola_images ci LEFT JOIN cola_images.cola_image_analysis cia ON ci.cola_id = cia.cola_id AND ci.file_name = cia.file_name WHERE ci.cola_id = c.cola_id AND cia.metadata IS NOT NULL AND TRIM(CAST(cia.metadata AS VARCHAR)) NOT IN ('', '""') AND LOWER(CAST(cia.metadata AS VARCHAR)) LIKE ?)",
-                "EXISTS (SELECT 1 FROM cola_images.cola_images ci LEFT JOIN cola_images.image_analysis_items iai ON ci.cola_id = iai.cola_id AND ci.file_name = iai.file_name WHERE ci.cola_id = c.cola_id AND LOWER(COALESCE(iai.text, '')) LIKE ?)"
-
-            ]) +
-        ')')
-        params.extend([ex_term]*7)
     if selected_start and selected_end:
         where_clauses.append('completed_date BETWEEN ? AND ?')
         params.extend([str(selected_start), str(selected_end)])
+    
+    # Image-related filters using pre-computed counts from vw_colas
+    if has_images_only:
+        where_clauses.append('c.downloaded_image_count > 0')
+    if has_analysis_only:
+        where_clauses.append('c.image_analysis_count > 0')
+    if has_violations_only:
+        where_clauses.append('c.cola_analysis_with_violations_count > 0')
+    
+    # Handle search terms efficiently
+    if search_term or exclude_term:
+        if search_term:
+            term = f"%{search_term.lower()}%"
+            search_conditions = [
+                'LOWER(CAST(c.cola_id AS VARCHAR)) LIKE ?',
+                'LOWER(COALESCE(c.brand_name, \'\')) LIKE ?',
+                'LOWER(COALESCE(c.fanciful_name, \'\')) LIKE ?',
+                'LOWER(COALESCE(c.permit_num, \'\')) LIKE ?',
+                'LOWER(COALESCE(c.serial_num, \'\')) LIKE ?'
+            ]
+            
+            # Add image analysis search if needed
+            search_conditions.append("""
+                EXISTS (
+                    SELECT 1 from cola_images.image_analysis_items iai 
+                    WHERE iai.cola_id = c.cola_id 
+                    AND LOWER(COALESCE(iai.text, '')) LIKE ?
+                )
+            """)
+            
+            # Add violation search if needed
+            search_conditions.append("""
+                EXISTS (
+                    SELECT 1 FROM cola_analysis ca
+                    WHERE ca.cola_id = c.cola_id
+                    AND (
+                        LOWER(CAST(ca.response AS VARCHAR)) LIKE ?
+                        OR LOWER(CAST(ca.metadata AS VARCHAR)) LIKE ?
+                    )
+                )
+            """)
+            
+            where_clauses.append('(' + ' OR '.join(search_conditions) + ')')
+            params.extend([term] * 8)  # 5 basic fields + 1 image analysis + 2 violation fields
+        
+        if exclude_term:
+            ex_term = f"%{exclude_term.lower()}%"
+            exclude_conditions = [
+                'LOWER(CAST(c.cola_id AS VARCHAR)) LIKE ?',
+                'LOWER(COALESCE(c.brand_name, \'\')) LIKE ?',
+                'LOWER(COALESCE(c.fanciful_name, \'\')) LIKE ?',
+                'LOWER(COALESCE(c.permit_num, \'\')) LIKE ?',
+                'LOWER(COALESCE(c.serial_num, \'\')) LIKE ?'
+            ]
+            
+            exclude_conditions.append("""
+                EXISTS (
+                    SELECT 1 from cola_images.image_analysis_items iai 
+                    WHERE iai.cola_id = c.cola_id 
+                    AND LOWER(COALESCE(iai.text, '')) LIKE ?
+                )
+            """)
+            
+            exclude_conditions.append("""
+                EXISTS (
+                    SELECT 1 FROM cola_analysis ca
+                    WHERE ca.cola_id = c.cola_id
+                    AND (
+                        LOWER(CAST(ca.response AS VARCHAR)) LIKE ?
+                        OR LOWER(CAST(ca.metadata AS VARCHAR)) LIKE ?
+                    )
+                )
+            """)
+            
+            where_clauses.append('NOT (' + ' OR '.join(exclude_conditions) + ')')
+            params.extend([ex_term] * 8)
+    
+    # Build final WHERE clause
     where_sql = ('WHERE ' + ' AND '.join(where_clauses)) if where_clauses else ''
-
-    # Query DuckDB for filtered results, including images and analysis as before
-    query = f'''
-        SELECT 
-            c.*, 
-            COALESCE(imgs.images_json, '[]') AS images
-        FROM cola_images.colas c
-        LEFT JOIN (
+    
+    # Execute main query
+    main_query = f"{base_query} {where_sql} ORDER BY completed_date DESC"
+    df = con.execute(main_query, params).fetchdf()
+    
+    # Get the cola_ids for additional data fetching
+    cola_ids = df['cola_id'].tolist()
+    
+    # Fetch images data separately for better performance
+    images_data = {}
+    if cola_ids:
+        images_query = """
             SELECT 
-                ci.cola_id, 
+                ci.cola_id,
                 json_group_array(
                     json_object(
                         'public_url', ci.public_url,
                         'img_type', ci.img_type,
                         'dimensions_txt', ci.dimensions_txt,
-                        'metadata', CASE WHEN cia.metadata IS NULL OR TRIM(CAST(cia.metadata AS VARCHAR)) IN ('', '""') THEN NULL ELSE cia.metadata END,
-                        'analysis_items', (
-                            SELECT json_group_array(json_object(
-                                'analysis_item_type', iai.analysis_item_type,
-                                'text', iai.text,
-                                'model_confidence', iai.model_confidence,
-                                'bounding_box', iai.bounding_box
-                            ))
-                            FROM cola_images.image_analysis_items iai
-                            WHERE iai.cola_id = ci.cola_id AND iai.file_name = ci.file_name
+                        'analysis_items', COALESCE(
+                            (
+                                SELECT json_group_array(json_object(
+                                    'analysis_item_type', iai.analysis_item_type,
+                                    'text', iai.text,
+                                    'model_confidence', iai.model_confidence,
+                                    'bounding_box', iai.bounding_box
+                                ))
+                                from cola_images.image_analysis_items iai
+                                WHERE iai.cola_id = ci.cola_id AND iai.file_name = ci.file_name
+                            ), 
+                            '[]'
                         )
                     )
                 ) AS images_json
             FROM vw_cola_images ci
-            LEFT JOIN cola_images.cola_image_analysis cia
-                ON ci.cola_id = cia.cola_id 
-                AND ci.file_name = cia.file_name
+            WHERE ci.cola_id IN (""" + ','.join(['?' for _ in cola_ids]) + """)
+            AND ci.public_url IS NOT NULL
             GROUP BY ci.cola_id
-        ) imgs ON c.cola_id = imgs.cola_id
-        {where_sql}
-    '''
-    df = con.execute(query, params).fetchdf()
+        """
+        
+        images_df = con.execute(images_query, cola_ids).fetchdf()
+        for _, row in images_df.iterrows():
+            try:
+                images_data[row['cola_id']] = json.loads(row['images_json'])
+            except Exception:
+                images_data[row['cola_id']] = []
+    
+    # Fetch violations data separately if needed
+    violations_data = {}
+    if has_violations_only or search_term:
+        if cola_ids:
+            violations_query = """
+                SELECT 
+                    cola_id,
+                    json_group_array(
+                        json_object(
+                            'violation_comment', violation_comment,
+                            'violation_type', violation_type,
+                            'violation_group', violation_group,
+                            'violation_subgroup', violation_subgroup
+                        )
+                    ) AS violations_json
+                FROM vw_cola_violations_list
+                WHERE cola_id IN (""" + ','.join(['?' for _ in cola_ids]) + """)
+                GROUP BY cola_id
+            """
+            
+            violations_df = con.execute(violations_query, cola_ids).fetchdf()
+            for _, row in violations_df.iterrows():
+                try:
+                    violations_data[row['cola_id']] = json.loads(row['violations_json'])
+                except Exception:
+                    violations_data[row['cola_id']] = []
+    
+    # Combine data
     filtered = df.to_dict(orient='records')
     for rec in filtered:
-        try:
-            rec['images'] = json.loads(rec['images'])
-        except Exception:
-            rec['images'] = []
+        cola_id = rec['cola_id']
+        rec['images'] = images_data.get(cola_id, [])
+        rec['violations'] = violations_data.get(cola_id, [])
+    
+    # Shuffle for variety
     random.shuffle(filtered)
 
     if len(filtered) > 100:
@@ -220,9 +308,16 @@ def main():
             highlight_term(c.get('brand_name', ''), search_term),
             highlight_term(c.get('origin', ''), search_term),
             highlight_term(c.get('class_type', ''), search_term),
-            f"Cmpltd: {c.get('completed_date').strftime('%m/%d/%Y')}"
+            f"Cmpltd: {c.get('completed_date').strftime('%m/%d/%Y') if c.get('completed_date') else 'N/A'}"
         ]
-        # Add links to TTB detail and images pages right after the Cmpltd date
+        
+        # Add summary counts
+        if c.get('downloaded_image_count', 0) > 0:
+            header_parts.append(f"📷 {c.get('downloaded_image_count')}")
+        if c.get('cola_analysis_with_violations_count', 0) > 0:
+            header_parts.append(f"⚠️ {c.get('cola_analysis_with_violations_count')} violations")
+        
+        # Add links to TTB detail and images pages
         cola_id = str(c.get('cola_id'))
         links = []
         if cola_id and cola_id != "None":
@@ -230,11 +325,28 @@ def main():
             links.append(f"<a href='{IMAGES_URL}{cola_id}' target='_blank' style='color:{HIGHLIGHT_COLOR};'>TTB Images</a>")
         if links:
             header_parts.append(' | '.join(links))
-        if c.get('publicformdisplay_url'):
-            header_parts.append(f"<a href='{c['publicformdisplay_url']}' target='_blank' style='color: {HIGHLIGHT_COLOR};'>TTB F 5100.31</a>")
+        if c.get('cola_form_url'):
+            header_parts.append(f"<a href='{c['cola_form_url']}' target='_blank' style='color: {HIGHLIGHT_COLOR};'>TTB F 5100.31</a>")
+        
         st.markdown('<span style="font-size:1.1em;line-height:1.1">' + ' | '.join(header_parts) + '</span>', unsafe_allow_html=True)
-        if c.get('images'):
-            for img_idx, img in enumerate(c['images']):
+        
+        # Show violations if present
+        violations = c.get('violations', [])
+        if violations:
+            st.markdown("**Violations Found:**")
+            for violation in violations[:5]:  # Limit to first 5 violations
+                violation_text = f"• **{violation.get('violation_type', 'Unknown')}** "
+                if violation.get('violation_group'):
+                    violation_text += f"({violation.get('violation_group')}) "
+                if violation.get('violation_comment'):
+                    violation_text += f": {highlight_term(violation.get('violation_comment'), search_term)}"
+                st.markdown(f"<span style='color:#d63384;font-size:0.9em'>{violation_text}</span>", unsafe_allow_html=True)
+            if len(violations) > 5:
+                st.markdown(f"<span style='color:#6c757d;font-size:0.85em'>... and {len(violations) - 5} more violations</span>", unsafe_allow_html=True)
+        # Show images if present
+        images = c.get('images', [])
+        if images:
+            for img_idx, img in enumerate(images):
                 cols = st.columns([1, 2])
                 with cols[0]:
                     public_url = img.get('public_url')
@@ -250,12 +362,6 @@ def main():
                         st.write("(Image not available)")
 
                 with cols[1]:
-                    def small_conf(val):
-                        try:
-                            percent = int(round(float(val) * 100))
-                            return f"<span style='font-size:0.85em;color:#888'>({percent}%)</span>"
-                        except Exception:
-                            return ""
                     img_type = img.get('img_type', 'N/A')
                     if isinstance(img_type, str) and img_type.startswith('Label Image: '):
                         img_type = img_type[len('Label Image: '):]
@@ -263,45 +369,52 @@ def main():
                         f"<span style='font-weight:600;color:{IMAGE_INFO_HEADER_COLOR}'>Type:</span> {highlight_term(img_type, search_term)}",
                         f"<span style='font-weight:600;color:{IMAGE_INFO_HEADER_COLOR}'>Dim:</span> {highlight_term(str(img.get('dimensions_txt', 'N/A')), search_term)}"
                     ]
-                    # Use analysis_items from image_analysis_items
+                    
+                    # Use analysis_items from cola_images.image_analysis_items
                     analysis_items = img.get('analysis_items')
-                    if analysis_items:
+                    if analysis_items and analysis_items != '[]':
                         try:
                             if isinstance(analysis_items, str):
                                 analysis_items = json.loads(analysis_items)
-                            # Group by type
-                            captions = [item for item in analysis_items if item.get('analysis_item_type') == 'dense_caption']
-                            tags = [item for item in analysis_items if item.get('analysis_item_type') == 'tag']
-                            objects = [item for item in analysis_items if item.get('analysis_item_type') == 'object']
-                            text_blocks = [item for item in analysis_items if item.get('analysis_item_type') == 'text_block']
-                            if captions:
-                                caption_texts = [
-                                    f"{highlight_term(cap.get('text', ''), search_term)} <span style='font-size:0.85em;color:#888'>({int(round(float(cap.get('model_confidence', 0))*100))}%)</span>" if cap.get('model_confidence') is not None else highlight_term(cap.get('text', ''), search_term)
-                                    for cap in captions
-                                ]
-                                details.append(f"<span style='font-weight:600;color:{IMAGE_INFO_HEADER_COLOR}'>Captions:</span> {'; '.join(caption_texts)}")
-                            if tags:
-                                tag_texts = [
-                                    f"{highlight_term(tag.get('text', ''), search_term)} <span style='font-size:0.85em;color:#888'>({int(round(float(tag.get('model_confidence', 0))*100))}%)</span>" if tag.get('model_confidence') is not None else highlight_term(tag.get('text', ''), search_term)
-                                    for tag in tags
-                                ]
-                                details.append(f"<span style='font-weight:600;color:{IMAGE_INFO_HEADER_COLOR}'>Tags:</span> {'; '.join(tag_texts)}")
-                            if objects:
-                                obj_texts = [
-                                    f"{highlight_term(obj.get('text', ''), search_term)} <span style='font-size:0.85em;color:#888'>({int(round(float(obj.get('model_confidence', 0))*100))}%)</span>" if obj.get('model_confidence') is not None else highlight_term(obj.get('text', ''), search_term)
-                                    for obj in objects
-                                ]
-                                details.append(f"<span style='font-weight:600;color:{IMAGE_INFO_HEADER_COLOR}'>Objects:</span> {'; '.join(obj_texts)}")
-                            if text_blocks:
-                                tb_texts = [
-                                    f"{highlight_term(tb.get('text', ''), search_term)} <span style='font-size:0.85em;color:#888'>({int(round(float(tb.get('model_confidence', 0))*100))}%)</span>" if tb.get('model_confidence') is not None else highlight_term(tb.get('text', ''), search_term)
-                                    for tb in text_blocks
-                                ]
-                                details.append(f"<span style='font-weight:600;color:{IMAGE_INFO_HEADER_COLOR}'>Text Blocks:</span> {'; '.join(tb_texts)}")
+                            if analysis_items:  # Check if list is not empty
+                                # Group by type
+                                captions = [item for item in analysis_items if item.get('analysis_item_type') == 'dense_caption']
+                                tags = [item for item in analysis_items if item.get('analysis_item_type') == 'tag']
+                                objects = [item for item in analysis_items if item.get('analysis_item_type') == 'object']
+                                text_blocks = [item for item in analysis_items if item.get('analysis_item_type') == 'text_block']
+                                
+                                if captions:
+                                    caption_texts = [
+                                        f"{highlight_term(cap.get('text', ''), search_term)} <span style='font-size:0.85em;color:#888'>({int(round(float(cap.get('model_confidence', 0))*100))}%)</span>" if cap.get('model_confidence') is not None else highlight_term(cap.get('text', ''), search_term)
+                                        for cap in captions[:3]  # Limit to first 3
+                                    ]
+                                    details.append(f"<span style='font-weight:600;color:{IMAGE_INFO_HEADER_COLOR}'>Captions:</span> {'; '.join(caption_texts)}")
+                                
+                                if tags:
+                                    tag_texts = [
+                                        f"{highlight_term(tag.get('text', ''), search_term)} <span style='font-size:0.85em;color:#888'>({int(round(float(tag.get('model_confidence', 0))*100))}%)</span>" if tag.get('model_confidence') is not None else highlight_term(tag.get('text', ''), search_term)
+                                        for tag in tags[:5]  # Limit to first 5
+                                    ]
+                                    details.append(f"<span style='font-weight:600;color:{IMAGE_INFO_HEADER_COLOR}'>Tags:</span> {'; '.join(tag_texts)}")
+                                
+                                if objects:
+                                    obj_texts = [
+                                        f"{highlight_term(obj.get('text', ''), search_term)} <span style='font-size:0.85em;color:#888'>({int(round(float(obj.get('model_confidence', 0))*100))}%)</span>" if obj.get('model_confidence') is not None else highlight_term(obj.get('text', ''), search_term)
+                                        for obj in objects[:5]  # Limit to first 5
+                                    ]
+                                    details.append(f"<span style='font-weight:600;color:{IMAGE_INFO_HEADER_COLOR}'>Objects:</span> {'; '.join(obj_texts)}")
+                                
+                                if text_blocks:
+                                    tb_texts = [
+                                        f"{highlight_term(tb.get('text', ''), search_term)} <span style='font-size:0.85em;color:#888'>({int(round(float(tb.get('model_confidence', 0))*100))}%)</span>" if tb.get('model_confidence') is not None else highlight_term(tb.get('text', ''), search_term)
+                                        for tb in text_blocks[:3]  # Limit to first 3
+                                    ]
+                                    details.append(f"<span style='font-weight:600;color:{IMAGE_INFO_HEADER_COLOR}'>Text Blocks:</span> {'; '.join(tb_texts)}")
                         except Exception as e:
                             details.append(f"<span style='color:#c00'>(Error parsing analysis_items: {e})</span>")
                     else:
                         details.append("<span style='color:#888'><i>No image analysis data found</i></span>")
+                    
                     st.markdown('<span style="font-size:0.92em;line-height:1.05">' + ' | '.join(details) + '</span>', unsafe_allow_html=True)
         # Remove the old version of TTB Details and TTB Images links at the end of each COLA record
         # Only keep the divider here
