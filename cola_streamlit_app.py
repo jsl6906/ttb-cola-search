@@ -118,7 +118,7 @@ def main():
     where_clauses = []
     params = []
     if has_images_only:
-        where_clauses.append('(SELECT COUNT(1) FROM cola_images.cola_images ci WHERE ci.cola_id = c.cola_id) > 0')
+        where_clauses.append('(SELECT COUNT(1) FROM vw_cola_images ci WHERE ci.cola_id = c.cola_id AND ci.public_url IS NOT NULL) > 0')
     if has_analysis_only:
         where_clauses.append("EXISTS (SELECT 1 FROM cola_images.cola_images ci LEFT JOIN cola_images.cola_image_analysis cia ON ci.cola_id = cia.cola_id AND ci.file_name = cia.file_name WHERE ci.cola_id = c.cola_id AND cia.metadata IS NOT NULL AND TRIM(CAST(cia.metadata AS VARCHAR)) NOT IN ('', '""'))")
     if selected_origin:
@@ -170,12 +170,13 @@ def main():
         FROM cola_images.colas c
         LEFT JOIN (
             SELECT 
-                cola_images.cola_id, 
+                ci.cola_id, 
                 json_group_array(
                     json_object(
-                        'local_path', cola_images.local_path,
-                        'img_type', cola_images.img_type,
-                        'dimensions_txt', cola_images.dimensions_txt,
+                        'public_url', ci.public_url,
+                        'local_path', ci.local_path,
+                        'img_type', ci.img_type,
+                        'dimensions_txt', ci.dimensions_txt,
                         'metadata', CASE WHEN cia.metadata IS NULL OR TRIM(CAST(cia.metadata AS VARCHAR)) IN ('', '""') THEN NULL ELSE cia.metadata END,
                         'analysis_items', (
                             SELECT json_group_array(json_object(
@@ -185,15 +186,15 @@ def main():
                                 'bounding_box', iai.bounding_box
                             ))
                             FROM cola_images.image_analysis_items iai
-                            WHERE iai.cola_id = cola_images.cola_id AND iai.file_name = cola_images.file_name
+                            WHERE iai.cola_id = ci.cola_id AND iai.file_name = ci.file_name
                         )
                     )
                 ) AS images_json
-            FROM cola_images.cola_images
+            FROM vw_cola_images ci
             LEFT JOIN cola_images.cola_image_analysis cia
-                ON cola_images.cola_id = cia.cola_id 
-                AND cola_images.file_name = cia.file_name
-            GROUP BY cola_images.cola_id
+                ON ci.cola_id = cia.cola_id 
+                AND ci.file_name = cia.file_name
+            GROUP BY ci.cola_id
         ) imgs ON c.cola_id = imgs.cola_id
         {where_sql}
     '''
@@ -237,24 +238,37 @@ def main():
             for img_idx, img in enumerate(c['images']):
                 cols = st.columns([1, 2])
                 with cols[0]:
-                    # Handle both local paths and URLs for images
+                    public_url = img.get('public_url')
                     local_path = img.get('local_path', '')
-                    if local_path.startswith('http://') or local_path.startswith('https://'):
-                        # URL-based image
+
+                    if public_url:
+                        # Use public_url if available
                         try:
-                            st.image(local_path, caption=None, use_container_width='always', output_format='auto')
+                            st.image(public_url, caption=None, use_container_width='always', output_format='auto')
                         except Exception:
-                            st.write('(Image could not be loaded)')
-                    else:
-                        # Local file path
-                        img_path = os.path.join(os.path.dirname(__file__), 'data', local_path)
-                        if os.path.exists(img_path):
-                            st.image(img_path, caption=None, use_container_width='always', output_format='auto')
+                            st.write('(Image could not be loaded from URL)')
+                            st.caption(public_url)
+                    elif local_path:
+                        # Fallback to local_path
+                        if local_path.startswith('http://') or local_path.startswith('https://'):
+                            # URL-based image in local_path
+                            try:
+                                st.image(local_path, caption=None, use_container_width='always', output_format='auto')
+                            except Exception:
+                                st.write('(Image could not be loaded)')
                         else:
-                            st.write('(Image not found locally)')
-                            # Show the path for debugging
-                            if local_path:
-                                st.caption(f"Expected: {local_path}")
+                            # Local file path
+                            img_path = os.path.join(os.path.dirname(__file__), 'data', local_path)
+                            if os.path.exists(img_path):
+                                st.image(img_path, caption=None, use_container_width='always', output_format='auto')
+                            else:
+                                st.write('(Image not found locally)')
+                                # Show the path for debugging
+                                if local_path:
+                                    st.caption(f"Expected: {local_path}")
+                    else:
+                        st.write("(Image not available)")
+
                 with cols[1]:
                     def small_conf(val):
                         try:
