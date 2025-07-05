@@ -164,7 +164,7 @@ def main():
             # Add violation search if needed
             search_conditions.append("""
                 EXISTS (
-                    SELECT 1 FROM cola_analysis ca
+                    SELECT 1 from cola_images.cola_analysis ca
                     WHERE ca.cola_id = c.cola_id
                     AND (
                         LOWER(CAST(ca.response AS VARCHAR)) LIKE ?
@@ -196,7 +196,7 @@ def main():
             
             exclude_conditions.append("""
                 EXISTS (
-                    SELECT 1 FROM cola_analysis ca
+                    SELECT 1 from cola_images.cola_analysis ca
                     WHERE ca.cola_id = c.cola_id
                     AND (
                         LOWER(CAST(ca.response AS VARCHAR)) LIKE ?
