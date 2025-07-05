@@ -174,7 +174,6 @@ def main():
                 json_group_array(
                     json_object(
                         'public_url', ci.public_url,
-                        'local_path', ci.local_path,
                         'img_type', ci.img_type,
                         'dimensions_txt', ci.dimensions_txt,
                         'metadata', CASE WHEN cia.metadata IS NULL OR TRIM(CAST(cia.metadata AS VARCHAR)) IN ('', '""') THEN NULL ELSE cia.metadata END,
@@ -239,7 +238,6 @@ def main():
                 cols = st.columns([1, 2])
                 with cols[0]:
                     public_url = img.get('public_url')
-                    local_path = img.get('local_path', '')
 
                     if public_url:
                         # Use public_url if available
@@ -248,24 +246,6 @@ def main():
                         except Exception:
                             st.write('(Image could not be loaded from URL)')
                             st.caption(public_url)
-                    elif local_path:
-                        # Fallback to local_path
-                        if local_path.startswith('http://') or local_path.startswith('https://'):
-                            # URL-based image in local_path
-                            try:
-                                st.image(local_path, caption=None, use_container_width='always', output_format='auto')
-                            except Exception:
-                                st.write('(Image could not be loaded)')
-                        else:
-                            # Local file path
-                            img_path = os.path.join(os.path.dirname(__file__), 'data', local_path)
-                            if os.path.exists(img_path):
-                                st.image(img_path, caption=None, use_container_width='always', output_format='auto')
-                            else:
-                                st.write('(Image not found locally)')
-                                # Show the path for debugging
-                                if local_path:
-                                    st.caption(f"Expected: {local_path}")
                     else:
                         st.write("(Image not available)")
 
