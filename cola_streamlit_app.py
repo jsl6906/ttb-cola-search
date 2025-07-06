@@ -64,6 +64,220 @@ def get_motherduck_connection():
         
         st.stop()
 
+def get_commodity_icon(commodity):
+    """
+    Return an appropriate icon for the commodity type.
+    
+    Commodity types from vw_colas.ct_commodity:
+    - 'beer': Beer and malt beverages
+    - 'wine': Wine, cider, mead, sake  
+    - 'distilled_spirits': Distilled spirits and liqueurs
+    - 'unknown': Unclassified or missing data
+    """
+    if not commodity:
+        return "❓"  # Unknown
+    
+    commodity_lower = str(commodity).lower()
+    if commodity_lower == 'beer':
+        return "🍺"  # Beer mug
+    elif commodity_lower == 'wine':
+        return "🍷"  # Wine glass
+    elif commodity_lower == 'distilled_spirits':
+        return "🍸"  # Cocktail
+    else:
+        return "🍶"  # Default alcoholic beverage
+
+def get_flag_icon(origin, ct_source=None):
+    """
+    Return an appropriate flag icon for the origin/country.
+    
+    Uses ct_source from database view to prioritize domestic vs import classification,
+    then maps specific origin values to their corresponding flag emojis.
+    """
+    # First check ct_source from database view - prioritize domestic
+    if ct_source and str(ct_source).lower().strip() == 'domestic':
+        return '🇺🇸'
+    
+    if not origin:
+        # If we have ct_source but no specific origin, use generic import flag
+        if ct_source and str(ct_source).lower().strip() == 'import':
+            return '🌍'
+        return ""
+    
+    origin_lower = str(origin).lower().strip()
+    
+    # Also check origin field for 'domestic' as fallback
+    if 'domestic' in origin_lower:
+        return '🇺🇸'
+    
+    # Map origins to flag emojis
+    flag_map = {
+        # US variations
+        'united states': '🇺🇸',
+        'usa': '🇺🇸',
+        'us': '🇺🇸',
+        'american': '🇺🇸',
+        
+        # Common countries
+        'france': '🇫🇷',
+        'french': '🇫🇷',
+        'italy': '🇮🇹',
+        'italian': '🇮🇹',
+        'spain': '🇪🇸',
+        'spanish': '🇪🇸',
+        'germany': '🇩🇪',
+        'german': '🇩🇪',
+        'portugal': '🇵🇹',
+        'portuguese': '🇵🇹',
+        'chile': '🇨🇱',
+        'chilean': '🇨🇱',
+        'argentina': '🇦🇷',
+        'argentine': '🇦🇷',
+        'australia': '🇦🇺',
+        'australian': '🇦🇺',
+        'new zealand': '🇳🇿',
+        'canada': '🇨🇦',
+        'canadian': '🇨🇦',
+        'mexico': '🇲🇽',
+        'mexican': '🇲🇽',
+        'japan': '🇯🇵',
+        'japanese': '🇯🇵',
+        'south africa': '🇿🇦',
+        'austria': '🇦🇹',
+        'austrian': '🇦🇹',
+        'hungary': '🇭🇺',
+        'hungarian': '🇭🇺',
+        'greece': '🇬🇷',
+        'greek': '🇬🇷',
+        'turkey': '🇹🇷',
+        'turkish': '🇹🇷',
+        'israel': '🇮🇱',
+        'lebanon': '🇱🇧',
+        'india': '🇮🇳',
+        'china': '🇨🇳',
+        'chinese': '🇨🇳',
+        'korea': '🇰🇷',
+        'korean': '🇰🇷',
+        'south korea': '🇰🇷',
+        'brazil': '🇧🇷',
+        'brazilian': '🇧🇷',
+        'peru': '🇵🇪',
+        'peruvian': '🇵🇪',
+        'uruguay': '🇺🇾',
+        'colombia': '🇨🇴',
+        'colombian': '🇨🇴',
+        'ecuador': '🇪🇨',
+        'bolivia': '🇧🇴',
+        'venezuela': '🇻🇪',
+        'armenia': '🇦🇲',
+        'armenian': '🇦🇲',
+        'georgia': '🇬🇪',
+        'georgian': '🇬🇪',
+        'moldova': '🇲🇩',
+        'ukraine': '🇺🇦',
+        'ukrainian': '🇺🇦',
+        'russia': '🇷🇺',
+        'russian': '🇷🇺',
+        'poland': '🇵🇱',
+        'polish': '🇵🇱',
+        'czech republic': '🇨🇿',
+        'czech': '🇨🇿',
+        'slovakia': '🇸🇰',
+        'slovak': '🇸🇰',
+        'slovenia': '🇸🇮',
+        'croatia': '🇭🇷',
+        'croatian': '🇭🇷',
+        'serbia': '🇷🇸',
+        'serbian': '🇷🇸',
+        'bulgaria': '🇧🇬',
+        'bulgarian': '🇧🇬',
+        'romania': '🇷🇴',
+        'romanian': '🇷🇴',
+        'ireland': '🇮🇪',
+        'irish': '🇮🇪',
+        'scotland': '🏴',
+        'scottish': '🏴',
+        'england': '🏴',
+        'english': '🏴',
+        'wales': '🏴',
+        'welsh': '🏴',
+        'united kingdom': '🇬🇧',
+        'uk': '🇬🇧',
+        'britain': '🇬🇧',
+        'british': '🇬🇧',
+        'netherlands': '🇳🇱',
+        'dutch': '🇳🇱',
+        'belgium': '🇧🇪',
+        'belgian': '🇧🇪',
+        'switzerland': '🇨🇭',
+        'swiss': '🇨🇭',
+        'denmark': '🇩🇰',
+        'danish': '🇩🇰',
+        'sweden': '🇸🇪',
+        'swedish': '🇸🇪',
+        'norway': '🇳🇴',
+        'norwegian': '🇳🇴',
+        'finland': '🇫🇮',
+        'finnish': '🇫🇮',
+        'iceland': '🇮🇸',
+        'icelandic': '🇮🇸',
+        'luxembourg': '🇱🇺',
+        'malta': '🇲🇹',
+        'cyprus': '🇨🇾',
+        'estonia': '🇪🇪',
+        'latvia': '🇱🇻',
+        'lithuania': '🇱🇹',
+        'morocco': '🇲🇦',
+        'moroccan': '🇲🇦',
+        'tunisia': '🇹🇳',
+        'algeria': '🇩🇿',
+        'egypt': '🇪🇬',
+        'egyptian': '🇪🇬',
+        'ethiopia': '🇪🇹',
+        'kenya': '🇰🇪',
+        'madagascar': '🇲🇬',
+        'thailand': '🇹🇭',
+        'thai': '🇹🇭',
+        'vietnam': '🇻🇳',
+        'vietnamese': '🇻🇳',
+        'cambodia': '🇰🇭',
+        'laos': '🇱🇦',
+        'myanmar': '🇲🇲',
+        'philippines': '🇵🇭',
+        'filipino': '🇵🇭',
+        'indonesia': '🇮🇩',
+        'indonesian': '🇮🇩',
+        'malaysia': '🇲🇾',
+        'singapore': '🇸🇬',
+        'sri lanka': '🇱🇰',
+        'bangladesh': '🇧🇩',
+        'pakistan': '🇵🇰',
+        'nepal': '🇳🇵',
+        'bhutan': '🇧🇹',
+        'mongolia': '🇲🇳',
+        'taiwan': '🇹🇼',
+        'hong kong': '🇭🇰',
+        'macau': '🇲🇴'
+    }
+    
+    # Check for exact match first
+    if origin_lower in flag_map:
+        return flag_map[origin_lower]
+    
+    # Check for partial matches (origin contains country name)
+    for country, flag in flag_map.items():
+        if country in origin_lower:
+            return flag
+    
+    # Default: if we know it's an import from ct_source, show import flag
+    # Only return empty string if origin is truly empty/unknown
+    if ct_source and str(ct_source).lower().strip() == 'import':
+        return '🌍'  # Globe icon for imports without specific country match
+    elif origin_lower and origin_lower not in ['unknown', 'n/a', '', 'none']:
+        return '🌍'  # Globe icon for generic imports
+    
+    return ""
+
 def get_unique_values(cola_data, key):
     # Replace None or empty values with 'UNKNOWN' and ensure all are strings
     return sorted(set(str(c.get(key)) if c.get(key) not in [None, ''] else 'UNKNOWN' for c in cola_data))
@@ -89,8 +303,7 @@ def main():
     st.sidebar.header('Filters')
     search_term = st.sidebar.text_input('Search (ID, Brand, Analysis, etc.)')
     exclude_term = st.sidebar.text_input('Exclude phrase (optional)')
-    has_images_only = st.sidebar.checkbox('Only COLAs with images', value=True)
-    has_analysis_only = st.sidebar.checkbox('Only COLAs with image analysis data', value=True)
+    has_analysis_only = st.sidebar.checkbox('Only COLAs with image analysis data', value=False)
     has_violations_only = st.sidebar.checkbox('Only COLAs with violations', value=False)
 
     # Date range filter for completed_date
@@ -112,8 +325,26 @@ def main():
     origin_options = sorted(set(str(o) for o in origin_options))
     class_type_options = [row[0] if row[0] else 'UNKNOWN' for row in con.execute("SELECT DISTINCT COALESCE(class_type, 'UNKNOWN') from cola_images.colas").fetchall()]
     class_type_options = sorted(set(str(c) for c in class_type_options))
+    
+    # Query for commodity options from vw_colas
+    commodity_data = con.execute("SELECT DISTINCT ct_commodity FROM vw_colas WHERE ct_commodity IS NOT NULL ORDER BY ct_commodity").fetchall()
+    commodity_options = [row[0] for row in commodity_data]
+    
+    # Create commodity display options with icons
+    commodity_display_options = []
+    commodity_value_map = {}
+    for commodity in commodity_options:
+        icon = get_commodity_icon(commodity)
+        display_name = f"{icon} {commodity.replace('_', ' ').title()}"
+        commodity_display_options.append(display_name)
+        commodity_value_map[display_name] = commodity
+    
+    selected_commodity_display = st.sidebar.multiselect('Commodity', commodity_display_options)
     selected_origin = st.sidebar.multiselect('Origin', origin_options)
     selected_class_type = st.sidebar.multiselect('Class Type', class_type_options)
+    
+    # Convert display selections back to actual values
+    selected_commodity = [commodity_value_map[display] for display in selected_commodity_display]
 
     # Build optimized query based on filters
     # Start with base COLA query using vw_colas for better performance
@@ -128,13 +359,14 @@ def main():
     if selected_class_type:
         where_clauses.append('COALESCE(c.class_type, \'UNKNOWN\') IN (' + ','.join(['?' for _ in selected_class_type]) + ')')
         params.extend(selected_class_type)
+    if selected_commodity:
+        where_clauses.append('c.ct_commodity IN (' + ','.join(['?' for _ in selected_commodity]) + ')')
+        params.extend(selected_commodity)
     if selected_start and selected_end:
         where_clauses.append('completed_date BETWEEN ? AND ?')
         params.extend([str(selected_start), str(selected_end)])
     
     # Image-related filters using pre-computed counts from vw_colas
-    if has_images_only:
-        where_clauses.append('c.downloaded_image_count > 0')
     if has_analysis_only:
         where_clauses.append('c.image_analysis_count > 0')
     if has_violations_only:
@@ -298,51 +530,100 @@ def main():
         st.write(f"Found {len(filtered):,} COLA records, limiting to 100 results displayed")
     else:
         st.write(f"Found {len(filtered):,} COLA records")
+    
+    # Show commodity distribution summary
+    if filtered:
+        commodity_counts = {}
+        for record in filtered:
+            commodity = record.get('ct_commodity', 'unknown')
+            commodity_counts[commodity] = commodity_counts.get(commodity, 0) + 1
+        
+        if len(commodity_counts) > 1:  # Only show if there are multiple commodities
+            commodity_summary = []
+            for commodity, count in sorted(commodity_counts.items()):
+                icon = get_commodity_icon(commodity)
+                display_name = commodity.replace('_', ' ').title() if commodity != 'unknown' else 'Unknown'
+                commodity_summary.append(f"{icon} {display_name}: {count:,}")
+            
+            st.markdown(f"**Commodity Distribution:** {' | '.join(commodity_summary)}")
+    
+    # Display results
     for c in filtered[:100]:  # Limit to 100 results for performance
+        # Get commodity icon
+        commodity_icon = get_commodity_icon(c.get('ct_commodity'))
+        
         # Condensed COLA header: COLA ID, Brand, Origin, Class Type, Date, and link in one line
         header_parts = [
             f"<b>{highlight_term(str(c.get('cola_id')), search_term)}</b>",
-            f"Permit#: {highlight_term(str(c.get('permit_num', 'N/A')), search_term)}",
-            f"Ser#: {highlight_term(str(c.get('serial_num', 'N/A')), search_term)}",
-            highlight_term(c.get('fanciful_name') or '', search_term),
-            highlight_term(c.get('brand_name', ''), search_term),
-            highlight_term(c.get('origin', ''), search_term),
-            highlight_term(c.get('class_type', ''), search_term),
-            f"Cmpltd: {c.get('completed_date').strftime('%m/%d/%Y') if c.get('completed_date') else 'N/A'}"
+            f"{highlight_term(str(c.get('permit_num', 'N/A')), search_term)}"
         ]
         
-        # Add summary counts
-        if c.get('downloaded_image_count', 0) > 0:
-            header_parts.append(f"📷 {c.get('downloaded_image_count')}")
-        if c.get('cola_analysis_with_violations_count', 0) > 0:
-            header_parts.append(f"⚠️ {c.get('cola_analysis_with_violations_count')} violations")
+        # Only add fanciful name if it exists and is not empty
+        if c.get('fanciful_name') and c.get('fanciful_name').strip():
+            header_parts.append(highlight_term(c.get('fanciful_name'), search_term))
         
-        # Add links to TTB detail and images pages
+        # Add brand name
+        header_parts.append(highlight_term(c.get('brand_name', ''), search_term))
+        
+        # Add origin with flag icon
+        origin = c.get('origin', '')
+        ct_source = c.get('ct_source', '')
+        flag_icon = get_flag_icon(origin, ct_source)
+        if flag_icon:
+            origin_display = f"{flag_icon} {highlight_term(origin, search_term)}"
+        else:
+            origin_display = highlight_term(origin, search_term)
+        header_parts.append(origin_display)
+        
+        header_parts.extend([
+            f"{commodity_icon} {highlight_term(c.get('class_type', ''), search_term)}",
+            f"☑️ {c.get('completed_date').strftime('%m/%d/%Y') if c.get('completed_date') else 'N/A'}"
+        ])
+        
+        # Add summary counts 
+        summary_parts = []
+        if c.get('downloaded_image_count', 0) > 0:
+            summary_parts.append(f"📷 {c.get('downloaded_image_count')}")
+        if c.get('cola_analysis_with_violations_count', 0) > 0:
+            summary_parts.append(f"⚠️ {c.get('cola_analysis_with_violations_count')} violations")
+        
+        if summary_parts:
+            header_parts.append(' | '.join(summary_parts))
+        
+        # Add links to TTB detail and images pages using database view URLs with icons
         cola_id = str(c.get('cola_id'))
         links = []
-        if cola_id and cola_id != "None":
-            links.append(f"<a href='{DETAIL_URL}{cola_id}' target='_blank' style='color:{HIGHLIGHT_COLOR};'>TTB Details</a>")
-            links.append(f"<a href='{IMAGES_URL}{cola_id}' target='_blank' style='color:{HIGHLIGHT_COLOR};'>TTB Images</a>")
-        if links:
-            header_parts.append(' | '.join(links))
+        
+        # Use URLs from database view with appropriate icons (no text labels)
+        if c.get('cola_details_url'):
+            links.append(f"<a href='{c['cola_details_url']}' target='_blank' style='color:{HIGHLIGHT_COLOR}; text-decoration:none;' title='Public COLA Registry Details'>ℹ️</a>")
         if c.get('cola_form_url'):
-            header_parts.append(f"<a href='{c['cola_form_url']}' target='_blank' style='color: {HIGHLIGHT_COLOR};'>TTB F 5100.31</a>")
+            links.append(f"<a href='{c['cola_form_url']}' target='_blank' style='color:{HIGHLIGHT_COLOR}; text-decoration:none;' title='Public COLA Registry Form'>📄</a>")
+        if c.get('cola_internal_url'):
+            links.append(f"<a href='{c['cola_internal_url']}' target='_blank' style='color:{HIGHLIGHT_COLOR}; text-decoration:none;' title='TTB Internal COLAs Online'>🔗</a>")
+        
+        if links:
+            header_parts.append(' '.join(links))
         
         st.markdown('<span style="font-size:1.1em;line-height:1.1">' + ' | '.join(header_parts) + '</span>', unsafe_allow_html=True)
         
         # Show violations if present
         violations = c.get('violations', [])
         if violations:
-            st.markdown("**Violations Found:**")
+            violation_lines = []
             for violation in violations[:5]:  # Limit to first 5 violations
                 violation_text = f"• **{violation.get('violation_type', 'Unknown')}** "
                 if violation.get('violation_group'):
                     violation_text += f"({violation.get('violation_group')}) "
                 if violation.get('violation_comment'):
                     violation_text += f": {highlight_term(violation.get('violation_comment'), search_term)}"
-                st.markdown(f"<span style='color:#d63384;font-size:0.9em'>{violation_text}</span>", unsafe_allow_html=True)
+                violation_lines.append(violation_text)
+            
             if len(violations) > 5:
-                st.markdown(f"<span style='color:#6c757d;font-size:0.85em'>... and {len(violations) - 5} more violations</span>", unsafe_allow_html=True)
+                violation_lines.append(f"... and {len(violations) - 5} more violations")
+            
+            violations_html = "<br>".join(violation_lines)
+            st.markdown(f"<div style='color:#d63384;font-size:0.85em;line-height:1.1;margin:0.2em 0;'><strong>Violations:</strong><br>{violations_html}</div>", unsafe_allow_html=True)
         # Show images if present
         images = c.get('images', [])
         if images:
@@ -415,7 +696,7 @@ def main():
                     else:
                         details.append("<span style='color:#888'><i>No image analysis data found</i></span>")
                     
-                    st.markdown('<span style="font-size:0.92em;line-height:1.05">' + ' | '.join(details) + '</span>', unsafe_allow_html=True)
+                    st.markdown('<div style="font-size:0.9em;line-height:1.1;margin:0.1em 0;">' + ' | '.join(details) + '</div>', unsafe_allow_html=True)
         # Remove the old version of TTB Details and TTB Images links at the end of each COLA record
         # Only keep the divider here
         st.divider()
