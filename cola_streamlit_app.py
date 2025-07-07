@@ -1,10 +1,12 @@
 # uv run streamlit run cola_streamlit_app.py
 import streamlit as st
-import os
-import random
 import duckdb
+import os
 import json
+import random
+import pandas as pd
 from dotenv import load_dotenv
+import altair as alt
 
 # Load environment variables from .env file
 load_dotenv()
@@ -18,6 +20,13 @@ HIGHLIGHT_COLOR = "#00ff99"  # Color for highlighted terms
 IMAGE_INFO_HEADER_COLOR = "#00ff99"  # Color for image info headers
 DETAIL_URL = "https://ttbonline.gov/colasonline/viewColaDetails.do?action=publicDisplaySearchAdvanced&ttbid="
 IMAGES_URL = "https://ttbonline.gov/colasonline/viewColaDetails.do?action=publicFormDisplay&ttbid="
+
+commodity_color_map = {
+    'wine': "#DD35DD",
+    'beer': "#ECA349", 
+    'distilled_spirits': "#5DCB8B"
+}
+default_color = "#8D8D8D"
 
 def get_motherduck_connection():
     """
@@ -68,7 +77,7 @@ def get_commodity_icon(commodity):
     """
     Return an appropriate icon for the commodity type.
     
-    Commodity types from vw_colas.ct_commodity:
+    Commodity types from cola_images.vw_colas.ct_commodity:
     - 'beer': Beer and malt beverages
     - 'wine': Wine, cider, mead, sake  
     - 'distilled_spirits': Distilled spirits and liqueurs
@@ -304,7 +313,7 @@ def main():
     search_term = st.sidebar.text_input('Search (ID, Brand, Analysis, etc.)')
     exclude_term = st.sidebar.text_input('Exclude phrase (optional)')
     has_analysis_only = st.sidebar.checkbox('Only COLAs with image analysis data', value=False)
-    has_violations_only = st.sidebar.checkbox('Only COLAs with violations', value=False)
+    has_violations_only = st.sidebar.checkbox('Only COLAs with review warnings', value=False)
 
     # Date range filter for completed_date
     min_date = con.execute('SELECT MIN(completed_date) from cola_images.colas WHERE completed_date IS NOT NULL').fetchone()[0]
@@ -312,11 +321,24 @@ def main():
     if min_date and max_date:
         min_date = min_date.strftime('%Y-%m-%d') if hasattr(min_date, 'strftime') else str(min_date)
         max_date = max_date.strftime('%Y-%m-%d') if hasattr(max_date, 'strftime') else str(max_date)
-        date_range = st.sidebar.date_input('Completed Date Range', value=(min_date, max_date), min_value=min_date, max_value=max_date)
+        
+        # Default to one year before max date, but not earlier than min_date
+        from datetime import datetime, timedelta
+        max_date_obj = datetime.strptime(max_date, '%Y-%m-%d')
+        min_date_obj = datetime.strptime(min_date, '%Y-%m-%d')
+        default_start_obj = max_date_obj - timedelta(days=365)
+        
+        # Ensure default start is not before the minimum available date
+        if default_start_obj < min_date_obj:
+            default_start_obj = min_date_obj
+            
+        default_start = default_start_obj.strftime('%Y-%m-%d')
+        
+        date_range = st.sidebar.date_input('Completed Date Range', value=(default_start, max_date), min_value=min_date, max_value=max_date)
         if isinstance(date_range, tuple) and len(date_range) == 2:
             selected_start, selected_end = date_range
         else:
-            selected_start, selected_end = min_date, max_date
+            selected_start, selected_end = default_start, max_date
     else:
         selected_start, selected_end = None, None
 
@@ -326,9 +348,23 @@ def main():
     class_type_options = [row[0] if row[0] else 'UNKNOWN' for row in con.execute("SELECT DISTINCT COALESCE(class_type, 'UNKNOWN') from cola_images.colas").fetchall()]
     class_type_options = sorted(set(str(c) for c in class_type_options))
     
-    # Query for commodity options from vw_colas
-    commodity_data = con.execute("SELECT DISTINCT ct_commodity FROM vw_colas WHERE ct_commodity IS NOT NULL ORDER BY ct_commodity").fetchall()
-    commodity_options = [row[0] for row in commodity_data]
+    # Query for commodity options from cola_images.vw_colas with custom ordering
+    commodity_data = con.execute("SELECT DISTINCT ct_commodity from cola_images.vw_colas WHERE ct_commodity IS NOT NULL").fetchall()
+    commodity_options_raw = [row[0] for row in commodity_data]
+    
+    # Custom order: Wine, Beer, Distilled Spirits, then others
+    commodity_order = ['wine', 'beer', 'distilled_spirits']
+    commodity_options = []
+    
+    # Add commodities in preferred order
+    for commodity in commodity_order:
+        if commodity in commodity_options_raw:
+            commodity_options.append(commodity)
+    
+    # Add any remaining commodities not in the preferred order
+    for commodity in sorted(commodity_options_raw):
+        if commodity not in commodity_options:
+            commodity_options.append(commodity)
     
     # Create commodity display options with icons
     commodity_display_options = []
@@ -348,7 +384,7 @@ def main():
 
     # Build optimized query based on filters
     # Start with base COLA query using vw_colas for better performance
-    base_query = "SELECT * FROM vw_colas c"
+    base_query = "SELECT * from cola_images.vw_colas c"
     where_clauses = []
     params = []
     
@@ -366,7 +402,7 @@ def main():
         where_clauses.append('completed_date BETWEEN ? AND ?')
         params.extend([str(selected_start), str(selected_end)])
     
-    # Image-related filters using pre-computed counts from vw_colas
+    # Image-related filters using pre-computed counts from cola_images.vw_colas
     if has_analysis_only:
         where_clauses.append('c.image_analysis_count > 0')
     if has_violations_only:
@@ -476,7 +512,7 @@ def main():
                         )
                     )
                 ) AS images_json
-            FROM vw_cola_images ci
+            from cola_images.vw_cola_images ci
             WHERE ci.cola_id IN (""" + ','.join(['?' for _ in cola_ids]) + """)
             AND ci.public_url IS NOT NULL
             GROUP BY ci.cola_id
@@ -504,7 +540,7 @@ def main():
                             'violation_subgroup', violation_subgroup
                         )
                     ) AS violations_json
-                FROM vw_cola_violations_list
+                FROM cola_images.vw_cola_violations_list
                 WHERE cola_id IN (""" + ','.join(['?' for _ in cola_ids]) + """)
                 GROUP BY cola_id
             """
@@ -540,13 +576,102 @@ def main():
         
         if len(commodity_counts) > 1:  # Only show if there are multiple commodities
             commodity_summary = []
-            for commodity, count in sorted(commodity_counts.items()):
-                icon = get_commodity_icon(commodity)
-                display_name = commodity.replace('_', ' ').title() if commodity != 'unknown' else 'Unknown'
-                commodity_summary.append(f"{icon} {display_name}: {count:,}")
             
-            st.markdown(f"**Commodity Distribution:** {' | '.join(commodity_summary)}")
-    
+            # Custom order for summary: Wine, Beer, Distilled Spirits, then others
+            summary_order = ['wine', 'beer', 'distilled_spirits']
+            
+            # Add commodities in preferred order first
+            for commodity in summary_order:
+                if commodity in commodity_counts:
+                    count = commodity_counts[commodity]
+                    icon = get_commodity_icon(commodity)
+                    color = commodity_color_map.get(commodity, default_color)
+                    commodity_summary.append(f"{icon} <span style='color:{color}'>■</span> {count:,}")
+            
+            # Add any remaining commodities not in the preferred order
+            for commodity in sorted(commodity_counts.keys()):
+                if commodity not in summary_order:
+                    count = commodity_counts[commodity]
+                    icon = get_commodity_icon(commodity)
+                    color = commodity_color_map.get(commodity, default_color)
+                    commodity_summary.append(f"{icon} <span style='color:{color}'>■</span> {count:,}")
+            
+            st.markdown(f"**Commodity Distribution:** {' | '.join(commodity_summary)}", unsafe_allow_html=True)
+
+    if filtered:
+        try:
+            chart_df = pd.DataFrame(filtered)
+            if 'completed_date' in chart_df.columns and not chart_df['completed_date'].isnull().all():
+                chart_df['completed_date'] = pd.to_datetime(chart_df['completed_date'])
+                
+                # Determine granularity based on the selected date range
+                from datetime import date, datetime
+                if isinstance(selected_start, date):
+                    start_date_obj = selected_start
+                else:
+                    start_date_obj = datetime.strptime(str(selected_start), '%Y-%m-%d').date()
+                
+                if isinstance(selected_end, date):
+                    end_date_obj = selected_end
+                else:
+                    end_date_obj = datetime.strptime(str(selected_end), '%Y-%m-%d').date()
+
+                date_diff_days = (end_date_obj - start_date_obj).days
+                
+                # Determine granularity based on the selected date range
+                if date_diff_days > 365:  # More than a year -> Monthly
+                    chart_df['time_agg'] = chart_df['completed_date'].dt.to_period('M').apply(lambda p: p.start_time).dt.date
+                    x_axis_title = 'Month'
+                elif date_diff_days > 60:  # 2 to 12 months -> Weekly
+                    chart_df['time_agg'] = chart_df['completed_date'].dt.to_period('W').apply(lambda p: p.start_time).dt.date
+                    x_axis_title = 'Week'
+                else:  # Up to 2 months -> Daily
+                    chart_df['time_agg'] = chart_df['completed_date'].dt.date
+                    x_axis_title = 'Date'
+
+                cola_counts = chart_df.groupby(['time_agg', 'ct_commodity']).size().unstack(fill_value=0)
+
+                if not cola_counts.empty:
+                    # Reorder columns to match commodity summary order for consistent colors
+                    commodity_order = ['wine', 'beer', 'distilled_spirits']
+                    present_commodities = [c for c in commodity_order if c in cola_counts.columns]
+                    other_commodities = sorted([c for c in cola_counts.columns if c not in commodity_order])
+                    final_order = present_commodities + other_commodities
+                    
+                    cola_counts = cola_counts[final_order]
+
+                    # Convert data to long format for Altair/Vega-Lite
+                    chart_data_long = cola_counts.reset_index().melt(
+                        id_vars='time_agg',
+                        value_vars=final_order,
+                        var_name='ct_commodity',
+                        value_name='count'
+                    )
+                    
+                    # Create Altair chart
+                    chart = alt.Chart(chart_data_long).mark_bar(width={'band': 0.8}).encode(
+                        x=alt.X('time_agg:T', title=x_axis_title, axis=alt.Axis(labelAngle=-45)),
+                        y=alt.Y('count:Q', title='COLA Count'),
+                        color=alt.Color('ct_commodity:N', 
+                                        scale=alt.Scale(
+                                            domain=final_order, 
+                                            range=[commodity_color_map.get(c, default_color) for c in final_order]
+                                        ),
+                                        legend=None),
+                        tooltip=['time_agg', 'ct_commodity', 'count']
+                    ).properties(
+                        height=200
+                    ).configure_view(
+                        strokeWidth=0
+                    ).configure_axis(
+                        grid=False
+                    )
+
+                    st.altair_chart(chart, use_container_width=True)
+        except Exception:
+            # Don't crash the app if chart fails
+            st.write("")
+
     # Display results
     for c in filtered[:100]:  # Limit to 100 results for performance
         # Get commodity icon
@@ -585,7 +710,7 @@ def main():
         if c.get('downloaded_image_count', 0) > 0:
             summary_parts.append(f"📷 {c.get('downloaded_image_count')}")
         if c.get('cola_analysis_with_violations_count', 0) > 0:
-            summary_parts.append(f"⚠️ {c.get('cola_analysis_with_violations_count')} violations")
+            summary_parts.append(f"⚠️ {c.get('cola_analysis_with_violations_count')} review warnings")
         
         if summary_parts:
             header_parts.append(' | '.join(summary_parts))
@@ -620,10 +745,10 @@ def main():
                 violation_lines.append(violation_text)
             
             if len(violations) > 5:
-                violation_lines.append(f"... and {len(violations) - 5} more violations")
+                violation_lines.append(f"... and {len(violations) - 5} more review warnings")
             
             violations_html = "<br>".join(violation_lines)
-            st.markdown(f"<div style='color:#d63384;font-size:0.85em;line-height:1.1;margin:0.2em 0;'><strong>Violations:</strong><br>{violations_html}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div style='color:#d63384;font-size:0.85em;line-height:1.1;margin:0.2em 0;'><strong>Review Warnings:</strong><br>{violations_html}</div>", unsafe_allow_html=True)
         # Show images if present
         images = c.get('images', [])
         if images:
@@ -667,28 +792,28 @@ def main():
                                 if captions:
                                     caption_texts = [
                                         f"{highlight_term(cap.get('text', ''), search_term)} <span style='font-size:0.85em;color:#888'>({int(round(float(cap.get('model_confidence', 0))*100))}%)</span>" if cap.get('model_confidence') is not None else highlight_term(cap.get('text', ''), search_term)
-                                        for cap in captions[:3]  # Limit to first 3
+                                        for cap in captions
                                     ]
                                     details.append(f"<span style='font-weight:600;color:{IMAGE_INFO_HEADER_COLOR}'>Captions:</span> {'; '.join(caption_texts)}")
                                 
                                 if tags:
                                     tag_texts = [
                                         f"{highlight_term(tag.get('text', ''), search_term)} <span style='font-size:0.85em;color:#888'>({int(round(float(tag.get('model_confidence', 0))*100))}%)</span>" if tag.get('model_confidence') is not None else highlight_term(tag.get('text', ''), search_term)
-                                        for tag in tags[:5]  # Limit to first 5
+                                        for tag in tags
                                     ]
                                     details.append(f"<span style='font-weight:600;color:{IMAGE_INFO_HEADER_COLOR}'>Tags:</span> {'; '.join(tag_texts)}")
                                 
                                 if objects:
                                     obj_texts = [
                                         f"{highlight_term(obj.get('text', ''), search_term)} <span style='font-size:0.85em;color:#888'>({int(round(float(obj.get('model_confidence', 0))*100))}%)</span>" if obj.get('model_confidence') is not None else highlight_term(obj.get('text', ''), search_term)
-                                        for obj in objects[:5]  # Limit to first 5
+                                        for obj in objects
                                     ]
                                     details.append(f"<span style='font-weight:600;color:{IMAGE_INFO_HEADER_COLOR}'>Objects:</span> {'; '.join(obj_texts)}")
                                 
                                 if text_blocks:
                                     tb_texts = [
                                         f"{highlight_term(tb.get('text', ''), search_term)} <span style='font-size:0.85em;color:#888'>({int(round(float(tb.get('model_confidence', 0))*100))}%)</span>" if tb.get('model_confidence') is not None else highlight_term(tb.get('text', ''), search_term)
-                                        for tb in text_blocks[:3]  # Limit to first 3
+                                        for tb in text_blocks
                                     ]
                                     details.append(f"<span style='font-weight:600;color:{IMAGE_INFO_HEADER_COLOR}'>Text Blocks:</span> {'; '.join(tb_texts)}")
                         except Exception as e:
