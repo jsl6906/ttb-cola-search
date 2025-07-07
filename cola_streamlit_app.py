@@ -298,6 +298,34 @@ def highlight_term(text, term):
     pattern = re.compile(re.escape(term), re.IGNORECASE)
     return pattern.sub(lambda m: f"<mark style='background: {HIGHLIGHT_COLOR}'>{m.group(0)}</mark>", text)
 
+def is_cola_id_list(search_term):
+    """
+    Check if the search term is a comma-separated list of 14-digit COLA IDs.
+    Returns tuple (is_cola_list, cola_ids_list) where:
+    - is_cola_list: True if the search term matches the pattern
+    - cola_ids_list: List of valid COLA IDs if is_cola_list is True, empty list otherwise
+    """
+    if not search_term or not isinstance(search_term, str):
+        return False, []
+    
+    # Split by comma and strip whitespace
+    parts = [part.strip() for part in search_term.split(',')]
+    
+    # Check if all parts are exactly 14 digits
+    cola_ids = []
+    for part in parts:
+        if len(part) == 14 and part.isdigit():
+            cola_ids.append(part)
+        else:
+            # If any part is not a 14-digit number, this is not a COLA ID list
+            return False, []
+    
+    # Must have at least one COLA ID
+    if cola_ids:
+        return True, cola_ids
+    else:
+        return False, []
+25118001000754, 25031001000754, 25171001000350
 def main():
     # Add logo at the top using st.logo()
     logo_path = os.path.join(os.path.dirname(__file__), 'resources/cola_search_logo.png')
@@ -411,38 +439,47 @@ def main():
     # Handle search terms efficiently
     if search_term or exclude_term:
         if search_term:
-            term = f"%{search_term.lower()}%"
-            search_conditions = [
-                'LOWER(CAST(c.cola_id AS VARCHAR)) LIKE ?',
-                'LOWER(COALESCE(c.brand_name, \'\')) LIKE ?',
-                'LOWER(COALESCE(c.fanciful_name, \'\')) LIKE ?',
-                'LOWER(COALESCE(c.permit_num, \'\')) LIKE ?',
-                'LOWER(COALESCE(c.serial_num, \'\')) LIKE ?'
-            ]
+            # Check if search term is a comma-separated list of 14-digit COLA IDs
+            is_cola_list, cola_ids = is_cola_id_list(search_term)
             
-            # Add image analysis search if needed
-            search_conditions.append("""
-                EXISTS (
-                    SELECT 1 from cola_images.image_analysis_items iai 
-                    WHERE iai.cola_id = c.cola_id 
-                    AND LOWER(COALESCE(iai.text, '')) LIKE ?
-                )
-            """)
-            
-            # Add violation search if needed
-            search_conditions.append("""
-                EXISTS (
-                    SELECT 1 from cola_images.cola_analysis ca
-                    WHERE ca.cola_id = c.cola_id
-                    AND (
-                        LOWER(CAST(ca.response AS VARCHAR)) LIKE ?
-                        OR LOWER(CAST(ca.metadata AS VARCHAR)) LIKE ?
+            if is_cola_list:
+                # Direct COLA ID search - much more efficient
+                where_clauses.append('c.cola_id IN (' + ','.join(['?' for _ in cola_ids]) + ')')
+                params.extend(cola_ids)
+            else:
+                # Regular text search across multiple fields
+                term = f"%{search_term.lower()}%"
+                search_conditions = [
+                    'LOWER(CAST(c.cola_id AS VARCHAR)) LIKE ?',
+                    'LOWER(COALESCE(c.brand_name, \'\')) LIKE ?',
+                    'LOWER(COALESCE(c.fanciful_name, \'\')) LIKE ?',
+                    'LOWER(COALESCE(c.permit_num, \'\')) LIKE ?',
+                    'LOWER(COALESCE(c.serial_num, \'\')) LIKE ?'
+                ]
+                
+                # Add image analysis search if needed
+                search_conditions.append("""
+                    EXISTS (
+                        SELECT 1 from cola_images.image_analysis_items iai 
+                        WHERE iai.cola_id = c.cola_id 
+                        AND LOWER(COALESCE(iai.text, '')) LIKE ?
                     )
-                )
-            """)
-            
-            where_clauses.append('(' + ' OR '.join(search_conditions) + ')')
-            params.extend([term] * 8)  # 5 basic fields + 1 image analysis + 2 violation fields
+                """)
+                
+                # Add violation search if needed
+                search_conditions.append("""
+                    EXISTS (
+                        SELECT 1 from cola_images.cola_analysis ca
+                        WHERE ca.cola_id = c.cola_id
+                        AND (
+                            LOWER(CAST(ca.response AS VARCHAR)) LIKE ?
+                            OR LOWER(CAST(ca.metadata AS VARCHAR)) LIKE ?
+                        )
+                    )
+                """)
+                
+                where_clauses.append('(' + ' OR '.join(search_conditions) + ')')
+                params.extend([term] * 8)  # 5 basic fields + 1 image analysis + 2 violation fields
         
         if exclude_term:
             ex_term = f"%{exclude_term.lower()}%"
