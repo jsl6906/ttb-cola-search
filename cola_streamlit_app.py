@@ -416,37 +416,42 @@ def main():
     where_clauses = []
     params = []
     
-    # Apply basic filters
-    if selected_origin:
-        where_clauses.append('COALESCE(c.origin, \'UNKNOWN\') IN (' + ','.join(['?' for _ in selected_origin]) + ')')
-        params.extend(selected_origin)
-    if selected_class_type:
-        where_clauses.append('COALESCE(c.class_type, \'UNKNOWN\') IN (' + ','.join(['?' for _ in selected_class_type]) + ')')
-        params.extend(selected_class_type)
-    if selected_commodity:
-        where_clauses.append('c.ct_commodity IN (' + ','.join(['?' for _ in selected_commodity]) + ')')
-        params.extend(selected_commodity)
-    if selected_start and selected_end:
-        where_clauses.append('completed_date BETWEEN ? AND ?')
-        params.extend([str(selected_start), str(selected_end)])
+    # Check if search term is a comma-separated list of 14-digit COLA IDs
+    is_cola_list = False
+    cola_ids = []
+    if search_term:
+        is_cola_list, cola_ids = is_cola_id_list(search_term)
     
-    # Image-related filters using pre-computed counts from cola_images.vw_colas
-    if has_analysis_only:
-        where_clauses.append('c.image_analysis_count > 0')
-    if has_violations_only:
-        where_clauses.append('c.cola_analysis_with_violations_count > 0')
-    
-    # Handle search terms efficiently
-    if search_term or exclude_term:
-        if search_term:
-            # Check if search term is a comma-separated list of 14-digit COLA IDs
-            is_cola_list, cola_ids = is_cola_id_list(search_term)
-            
-            if is_cola_list:
-                # Direct COLA ID search - much more efficient
-                where_clauses.append('c.cola_id IN (' + ','.join(['?' for _ in cola_ids]) + ')')
-                params.extend(cola_ids)
-            else:
+    if is_cola_list:
+        # When searching for specific COLA IDs, ignore all other filters
+        where_clauses.append('c.cola_id IN (' + ','.join(['?' for _ in cola_ids]) + ')')
+        params.extend(cola_ids)
+    else:
+        # Apply all filters only when NOT searching for specific COLA IDs
+        
+        # Apply basic filters
+        if selected_origin:
+            where_clauses.append('COALESCE(c.origin, \'UNKNOWN\') IN (' + ','.join(['?' for _ in selected_origin]) + ')')
+            params.extend(selected_origin)
+        if selected_class_type:
+            where_clauses.append('COALESCE(c.class_type, \'UNKNOWN\') IN (' + ','.join(['?' for _ in selected_class_type]) + ')')
+            params.extend(selected_class_type)
+        if selected_commodity:
+            where_clauses.append('c.ct_commodity IN (' + ','.join(['?' for _ in selected_commodity]) + ')')
+            params.extend(selected_commodity)
+        if selected_start and selected_end:
+            where_clauses.append('completed_date BETWEEN ? AND ?')
+            params.extend([str(selected_start), str(selected_end)])
+        
+        # Image-related filters using pre-computed counts from cola_images.vw_colas
+        if has_analysis_only:
+            where_clauses.append('c.image_analysis_count > 0')
+        if has_violations_only:
+            where_clauses.append('c.cola_analysis_with_violations_count > 0')
+        
+        # Handle search terms efficiently
+        if search_term or exclude_term:
+            if search_term:
                 # Regular text search across multiple fields
                 term = f"%{search_term.lower()}%"
                 search_conditions = [
@@ -480,38 +485,38 @@ def main():
                 
                 where_clauses.append('(' + ' OR '.join(search_conditions) + ')')
                 params.extend([term] * 8)  # 5 basic fields + 1 image analysis + 2 violation fields
-        
-        if exclude_term:
-            ex_term = f"%{exclude_term.lower()}%"
-            exclude_conditions = [
-                'LOWER(CAST(c.cola_id AS VARCHAR)) LIKE ?',
-                'LOWER(COALESCE(c.brand_name, \'\')) LIKE ?',
-                'LOWER(COALESCE(c.fanciful_name, \'\')) LIKE ?',
-                'LOWER(COALESCE(c.permit_num, \'\')) LIKE ?',
-                'LOWER(COALESCE(c.serial_num, \'\')) LIKE ?'
-            ]
             
-            exclude_conditions.append("""
-                EXISTS (
-                    SELECT 1 from cola_images.image_analysis_items iai 
-                    WHERE iai.cola_id = c.cola_id 
-                    AND LOWER(COALESCE(iai.text, '')) LIKE ?
-                )
-            """)
-            
-            exclude_conditions.append("""
-                EXISTS (
-                    SELECT 1 from cola_images.cola_analysis ca
-                    WHERE ca.cola_id = c.cola_id
-                    AND (
-                        LOWER(CAST(ca.response AS VARCHAR)) LIKE ?
-                        OR LOWER(CAST(ca.metadata AS VARCHAR)) LIKE ?
+            if exclude_term:
+                ex_term = f"%{exclude_term.lower()}%"
+                exclude_conditions = [
+                    'LOWER(CAST(c.cola_id AS VARCHAR)) LIKE ?',
+                    'LOWER(COALESCE(c.brand_name, \'\')) LIKE ?',
+                    'LOWER(COALESCE(c.fanciful_name, \'\')) LIKE ?',
+                    'LOWER(COALESCE(c.permit_num, \'\')) LIKE ?',
+                    'LOWER(COALESCE(c.serial_num, \'\')) LIKE ?'
+                ]
+                
+                exclude_conditions.append("""
+                    EXISTS (
+                        SELECT 1 from cola_images.image_analysis_items iai 
+                        WHERE iai.cola_id = c.cola_id 
+                        AND LOWER(COALESCE(iai.text, '')) LIKE ?
                     )
-                )
-            """)
-            
-            where_clauses.append('NOT (' + ' OR '.join(exclude_conditions) + ')')
-            params.extend([ex_term] * 8)
+                """)
+                
+                exclude_conditions.append("""
+                    EXISTS (
+                        SELECT 1 from cola_images.cola_analysis ca
+                        WHERE ca.cola_id = c.cola_id
+                        AND (
+                            LOWER(CAST(ca.response AS VARCHAR)) LIKE ?
+                            OR LOWER(CAST(ca.metadata AS VARCHAR)) LIKE ?
+                        )
+                    )
+                """)
+                
+                where_clauses.append('NOT (' + ' OR '.join(exclude_conditions) + ')')
+                params.extend([ex_term] * 8)
     
     # Build final WHERE clause
     where_sql = ('WHERE ' + ' AND '.join(where_clauses)) if where_clauses else ''
@@ -533,6 +538,7 @@ def main():
                     json_object(
                         'public_url', ci.public_url,
                         'img_type', ci.img_type,
+                        'file_name', ci.file_name,
                         'dimensions_txt', ci.dimensions_txt,
                         'analysis_items', COALESCE(
                             (
@@ -747,7 +753,7 @@ def main():
         if c.get('downloaded_image_count', 0) > 0:
             summary_parts.append(f"📷 {c.get('downloaded_image_count')}")
         if c.get('cola_analysis_with_violations_count', 0) > 0:
-            summary_parts.append(f"⚠️ {c.get('cola_analysis_with_violations_count')} review warnings")
+            summary_parts.append(f"⚠️ {c.get('cola_analysis_with_violations_count')}")
         
         if summary_parts:
             header_parts.append(' | '.join(summary_parts))
@@ -774,18 +780,16 @@ def main():
         if violations:
             violation_lines = []
             for violation in violations[:5]:  # Limit to first 5 violations
-                violation_text = f"• **{violation.get('violation_type', 'Unknown')}** "
-                if violation.get('violation_group'):
-                    violation_text += f"({violation.get('violation_group')}) "
                 if violation.get('violation_comment'):
-                    violation_text += f": {highlight_term(violation.get('violation_comment'), search_term)}"
-                violation_lines.append(violation_text)
+                    violation_text = f"• {highlight_term(violation.get('violation_comment'), search_term)}"
+                    violation_lines.append(violation_text)
             
             if len(violations) > 5:
                 violation_lines.append(f"... and {len(violations) - 5} more review warnings")
             
-            violations_html = "<br>".join(violation_lines)
-            st.markdown(f"<div style='color:#d63384;font-size:0.85em;line-height:1.1;margin:0.2em 0;'><strong>Review Warnings:</strong><br>{violations_html}</div>", unsafe_allow_html=True)
+            if violation_lines:  # Only show if there are actual comments to display
+                violations_html = "<br>".join(violation_lines)
+                st.markdown(f"<div style='color:#d63384;font-size:0.85em;line-height:1.1;margin:0.2em 0;'><strong>Review Warnings:</strong><br>{violations_html}</div>", unsafe_allow_html=True)
         # Show images if present
         images = c.get('images', [])
         if images:
@@ -809,6 +813,7 @@ def main():
                     if isinstance(img_type, str) and img_type.startswith('Label Image: '):
                         img_type = img_type[len('Label Image: '):]
                     details = [
+                        f"<span style='font-weight:600;color:{IMAGE_INFO_HEADER_COLOR}'>File:</span> {highlight_term(str(img.get('file_name', 'N/A')), search_term)}",
                         f"<span style='font-weight:600;color:{IMAGE_INFO_HEADER_COLOR}'>Type:</span> {highlight_term(img_type, search_term)}",
                         f"<span style='font-weight:600;color:{IMAGE_INFO_HEADER_COLOR}'>Dim:</span> {highlight_term(str(img.get('dimensions_txt', 'N/A')), search_term)}"
                     ]
