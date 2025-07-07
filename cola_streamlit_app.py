@@ -350,11 +350,11 @@ def main():
         min_date = min_date.strftime('%Y-%m-%d') if hasattr(min_date, 'strftime') else str(min_date)
         max_date = max_date.strftime('%Y-%m-%d') if hasattr(max_date, 'strftime') else str(max_date)
         
-        # Default to one year before max date, but not earlier than min_date
+        # Default to defined # of days before max date, but not earlier than min_date
         from datetime import datetime, timedelta
         max_date_obj = datetime.strptime(max_date, '%Y-%m-%d')
         min_date_obj = datetime.strptime(min_date, '%Y-%m-%d')
-        default_start_obj = max_date_obj - timedelta(days=365)
+        default_start_obj = max_date_obj - timedelta(days=14)
         
         # Ensure default start is not before the minimum available date
         if default_start_obj < min_date_obj:
