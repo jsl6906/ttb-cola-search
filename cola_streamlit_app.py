@@ -325,7 +325,7 @@ def is_cola_id_list(search_term):
         return True, cola_ids
     else:
         return False, []
-25118001000754, 25031001000754, 25171001000350
+
 def main():
     # Add logo at the top using st.logo()
     logo_path = os.path.join(os.path.dirname(__file__), 'resources/cola_search_logo.png')
