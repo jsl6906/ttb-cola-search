@@ -773,7 +773,12 @@ def main():
         if links:
             header_parts.append(' '.join(links))
         
-        st.markdown('<span style="font-size:1.1em;line-height:1.1">' + ' | '.join(header_parts) + '</span>', unsafe_allow_html=True)
+        st.markdown(
+            '<div style="font-size:1.1em;line-height:1.3">'
+            + '<br>'.join(str(part) if part is not None else '' for part in header_parts)
+            + '</div>',
+            unsafe_allow_html=True
+        )
         
         # Show violations if present
         violations = c.get('violations', [])
