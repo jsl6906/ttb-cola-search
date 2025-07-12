@@ -336,12 +336,21 @@ def main():
     # Connect to MotherDuck database
     con = get_motherduck_connection()
 
+    # Load filters from URL parameters
+    query_params = st.query_params
+    
+    # Helper function to parse comma-separated values from URL
+    def parse_url_list(param_value):
+        if param_value:
+            return [item.strip() for item in param_value.split(',') if item.strip()]
+        return []
+
     # Sidebar filters
     st.sidebar.header('Filters')
-    search_term = st.sidebar.text_input('Search (ID, Brand, Analysis, etc.)')
-    exclude_term = st.sidebar.text_input('Exclude phrase (optional)')
-    has_analysis_only = st.sidebar.checkbox('Only COLAs with image analysis data', value=False)
-    has_violations_only = st.sidebar.checkbox('Only COLAs with review warnings', value=False)
+    search_term = st.sidebar.text_input('Search (ID, Brand, Analysis, etc.)', value=query_params.get('search', ''))
+    exclude_term = st.sidebar.text_input('Exclude phrase (optional)', value=query_params.get('exclude', ''))
+    has_analysis_only = st.sidebar.checkbox('Only COLAs with image analysis data', value=query_params.get('analysis_only', 'false').lower() == 'true')
+    has_violations_only = st.sidebar.checkbox('Only COLAs with review warnings', value=query_params.get('violations_only', 'false').lower() == 'true')
 
     # Date range filter for completed_date
     min_date = con.execute('SELECT MIN(completed_date) from cola_images.colas WHERE completed_date IS NOT NULL').fetchone()[0]
@@ -349,6 +358,10 @@ def main():
     if min_date and max_date:
         min_date = min_date.strftime('%Y-%m-%d') if hasattr(min_date, 'strftime') else str(min_date)
         max_date = max_date.strftime('%Y-%m-%d') if hasattr(max_date, 'strftime') else str(max_date)
+        
+        # Check for URL parameters for date range
+        url_start_date = query_params.get('start_date')
+        url_end_date = query_params.get('end_date')
         
         # Default to defined # of days before max date, but not earlier than min_date
         from datetime import datetime, timedelta
@@ -362,7 +375,19 @@ def main():
             
         default_start = default_start_obj.strftime('%Y-%m-%d')
         
-        date_range = st.sidebar.date_input('Completed Date Range', value=(default_start, max_date), min_value=min_date, max_value=max_date)
+        # Use URL parameters if available, otherwise use defaults
+        if url_start_date and url_end_date:
+            try:
+                # Validate the URL date parameters
+                datetime.strptime(url_start_date, '%Y-%m-%d')
+                datetime.strptime(url_end_date, '%Y-%m-%d')
+                default_date_range = (url_start_date, url_end_date)
+            except ValueError:
+                default_date_range = (default_start, max_date)
+        else:
+            default_date_range = (default_start, max_date)
+        
+        date_range = st.sidebar.date_input('Completed Date Range', value=default_date_range, min_value=min_date, max_value=max_date)
         if isinstance(date_range, tuple) and len(date_range) == 2:
             selected_start, selected_end = date_range
         else:
@@ -375,6 +400,10 @@ def main():
     origin_options = sorted(set(str(o) for o in origin_options))
     class_type_options = [row[0] if row[0] else 'UNKNOWN' for row in con.execute("SELECT DISTINCT COALESCE(class_type, 'UNKNOWN') from cola_images.colas").fetchall()]
     class_type_options = sorted(set(str(c) for c in class_type_options))
+    
+    # Query for brand options
+    brand_options = [row[0] if row[0] else 'UNKNOWN' for row in con.execute("SELECT DISTINCT COALESCE(brand_name, 'UNKNOWN') from cola_images.colas WHERE brand_name IS NOT NULL AND TRIM(brand_name) != ''").fetchall()]
+    brand_options = sorted(set(str(b) for b in brand_options))
     
     # Query for commodity options from cola_images.vw_colas with custom ordering
     commodity_data = con.execute("SELECT DISTINCT ct_commodity from cola_images.vw_colas WHERE ct_commodity IS NOT NULL").fetchall()
@@ -403,12 +432,50 @@ def main():
         commodity_display_options.append(display_name)
         commodity_value_map[display_name] = commodity
     
-    selected_commodity_display = st.sidebar.multiselect('Commodity', commodity_display_options)
-    selected_origin = st.sidebar.multiselect('Origin', origin_options)
-    selected_class_type = st.sidebar.multiselect('Class Type', class_type_options)
+    selected_commodity_display = st.sidebar.multiselect('Commodity', commodity_display_options, default=[display for display in commodity_display_options if commodity_value_map[display] in parse_url_list(query_params.get('commodity', ''))])
+    selected_origin = st.sidebar.multiselect('Origin', origin_options, default=parse_url_list(query_params.get('origin', '')))
+    selected_class_type = st.sidebar.multiselect('Class Type', class_type_options, default=parse_url_list(query_params.get('class_type', '')))
+    selected_brand = st.sidebar.multiselect('Brand Name', brand_options, default=parse_url_list(query_params.get('brand', '')))
     
     # Convert display selections back to actual values
     selected_commodity = [commodity_value_map[display] for display in selected_commodity_display]
+
+    # Update URL parameters to reflect current filter state
+    new_query_params = {}
+    
+    if search_term:
+        new_query_params['search'] = search_term
+    if exclude_term:
+        new_query_params['exclude'] = exclude_term
+    if has_analysis_only:
+        new_query_params['analysis_only'] = 'true'
+    if has_violations_only:
+        new_query_params['violations_only'] = 'true'
+    if selected_start and selected_end:
+        new_query_params['start_date'] = str(selected_start)
+        new_query_params['end_date'] = str(selected_end)
+    if selected_commodity:
+        new_query_params['commodity'] = ','.join(selected_commodity)
+    if selected_origin:
+        new_query_params['origin'] = ','.join(selected_origin)
+    if selected_class_type:
+        new_query_params['class_type'] = ','.join(selected_class_type)
+    if selected_brand:
+        new_query_params['brand'] = ','.join(selected_brand)
+    
+    # Update query parameters (this creates a shareable URL)
+    st.query_params.update(new_query_params)
+    
+    # Add share functionality in sidebar
+    st.sidebar.divider()
+    if st.sidebar.button("📋 Share Current Search", help="Get a shareable URL with current filter settings"):
+        if new_query_params:
+            from urllib.parse import quote
+            params_string = "&".join([f"{k}={quote(str(v))}" for k, v in new_query_params.items()])
+            st.sidebar.success("✅ Copy this URL to share current search filters:")
+            st.sidebar.code(f"?{params_string}", language="text")
+        else:
+            st.sidebar.info("ℹ️ No filters applied to share")
 
     # Build optimized query based on filters
     # Start with base COLA query using vw_colas for better performance
@@ -439,6 +506,9 @@ def main():
         if selected_commodity:
             where_clauses.append('c.ct_commodity IN (' + ','.join(['?' for _ in selected_commodity]) + ')')
             params.extend(selected_commodity)
+        if selected_brand:
+            where_clauses.append('COALESCE(c.brand_name, \'UNKNOWN\') IN (' + ','.join(['?' for _ in selected_brand]) + ')')
+            params.extend(selected_brand)
         if selected_start and selected_end:
             where_clauses.append('completed_date BETWEEN ? AND ?')
             params.extend([str(selected_start), str(selected_end)])
@@ -605,10 +675,100 @@ def main():
     # Shuffle for variety
     random.shuffle(filtered)
 
+    # Add search explanation showing active filters
+    filter_explanations = []
+    
+    # Date range explanation
+    if selected_start and selected_end:
+        from datetime import datetime
+        if isinstance(selected_start, str):
+            start_date = datetime.strptime(selected_start, '%Y-%m-%d').strftime('%B %d, %Y')
+        else:
+            start_date = selected_start.strftime('%B %d, %Y')
+        
+        if isinstance(selected_end, str):
+            end_date = datetime.strptime(selected_end, '%Y-%m-%d').strftime('%B %d, %Y')
+        else:
+            end_date = selected_end.strftime('%B %d, %Y')
+        
+        filter_explanations.append(f"with completion date from {start_date} through {end_date}")
+    
+    # Commodity filter explanation
+    if selected_commodity:
+        if len(selected_commodity) == 1:
+            commodity_text = selected_commodity[0].replace('_', ' ').title()
+            filter_explanations.append(f"limited to {commodity_text} COLAs only")
+        else:
+            commodity_list = [c.replace('_', ' ').title() for c in selected_commodity]
+            if len(commodity_list) == 2:
+                commodity_text = ' and '.join(commodity_list)
+            else:
+                commodity_text = ', '.join(commodity_list[:-1]) + ', and ' + commodity_list[-1]
+            filter_explanations.append(f"limited to {commodity_text} COLAs")
+    
+    # Brand filter explanation
+    if selected_brand:
+        if len(selected_brand) == 1:
+            filter_explanations.append(f"for brand {selected_brand[0]}")
+        else:
+            if len(selected_brand) == 2:
+                brand_text = ' and '.join(selected_brand)
+            else:
+                brand_text = ', '.join(selected_brand[:-1]) + ', and ' + selected_brand[-1]
+            filter_explanations.append(f"for brands {brand_text}")
+    
+    # Origin filter explanation
+    if selected_origin:
+        if len(selected_origin) == 1:
+            filter_explanations.append(f"of origin {selected_origin[0]}")
+        else:
+            if len(selected_origin) == 2:
+                origin_text = ' and '.join(selected_origin)
+            else:
+                origin_text = ', '.join(selected_origin[:-1]) + ', and ' + selected_origin[-1]
+            filter_explanations.append(f"of origins {origin_text}")
+    
+    # Class Type filter explanation
+    if selected_class_type:
+        if len(selected_class_type) == 1:
+            filter_explanations.append(f"with Class Type = {selected_class_type[0]}")
+        else:
+            class_type_list = ', '.join(selected_class_type)
+            filter_explanations.append(f"with Class Type = [{class_type_list}]")
+    
+    # Search term explanation
+    if search_term and not is_cola_list:
+        filter_explanations.append(f"matching search term '{search_term}'")
+    elif is_cola_list:
+        if len(cola_ids) == 1:
+            filter_explanations.append(f"for COLA ID {cola_ids[0]}")
+        else:
+            filter_explanations.append(f"for {len(cola_ids)} specific COLA IDs")
+    
+    # Exclude term explanation
+    if exclude_term:
+        filter_explanations.append(f"excluding '{exclude_term}'")
+    
+    # Special filter explanations
+    if has_analysis_only:
+        filter_explanations.append("with image analysis data")
+    
+    if has_violations_only:
+        filter_explanations.append("with review warnings")
+    
+    # Build the results message with inline filter explanation
+    results_message = f"Found {len(filtered):,} COLA records"
+    
+    # Add filter explanation inline if any filters are active
+    if filter_explanations:
+        explanation_text = ', '.join(filter_explanations)
+        results_message += f" {explanation_text}"
+    
+    # Add limiting note if applicable
     if len(filtered) > 100:
-        st.write(f"Found {len(filtered):,} COLA records, limiting to 100 results displayed")
-    else:
-        st.write(f"Found {len(filtered):,} COLA records")
+        results_message += ", limiting to 100 results displayed"
+    
+    st.write(results_message)
     
     # Show commodity distribution summary
     if filtered:
@@ -670,7 +830,7 @@ def main():
                     x_axis_title = 'Week'
                 else:  # Up to 2 months -> Daily
                     chart_df['time_agg'] = chart_df['completed_date'].dt.date
-                    x_axis_title = 'Date'
+                    x_axis_title = 'Completed Date'
 
                 cola_counts = chart_df.groupby(['time_agg', 'ct_commodity']).size().unstack(fill_value=0)
 
@@ -692,7 +852,10 @@ def main():
                     )
                     
                     # Create Altair chart
-                    chart = alt.Chart(chart_data_long).mark_bar(width={'band': 0.8}).encode(
+                    base_chart = alt.Chart(chart_data_long)
+                    
+                    # Bar chart layer
+                    bars = base_chart.mark_bar(width={'band': 0.8}).encode(
                         x=alt.X('time_agg:T', title=x_axis_title, axis=alt.Axis(labelAngle=-45)),
                         y=alt.Y('count:Q', title='COLA Count'),
                         color=alt.Color('ct_commodity:N', 
@@ -702,6 +865,29 @@ def main():
                                         ),
                                         legend=None),
                         tooltip=['time_agg', 'ct_commodity', 'count']
+                    )
+                    
+                    # Calculate totals for each time period
+                    totals_data = chart_data_long.groupby('time_agg')['count'].sum().reset_index()
+                    totals_data.columns = ['time_agg', 'total_count']
+                    
+                    # Text labels layer for totals
+                    text_labels = alt.Chart(totals_data).mark_text(
+                        align='center',
+                        baseline='bottom',
+                        dy=-5,  # Offset above the bar
+                        fontSize=10,
+                        fontWeight='bold'
+                    ).encode(
+                        x=alt.X('time_agg:T'),
+                        y=alt.Y('total_count:Q'),
+                        text=alt.Text('total_count:Q', format=',d'),
+                        color=alt.value('var(--text-color)')  # Use CSS variable for theme adaptation
+                    )
+                    
+                    # Combine layers
+                    chart = (bars + text_labels).resolve_scale(
+                        y='shared'
                     ).properties(
                         height=200
                     ).configure_view(
@@ -714,6 +900,10 @@ def main():
         except Exception:
             # Don't crash the app if chart fails
             st.write("")
+
+    # Add visual separator between summary/chart and search results
+    if filtered:
+        st.divider()
 
     # Display results
     for c in filtered[:100]:  # Limit to 100 results for performance
@@ -750,8 +940,6 @@ def main():
         
         # Add summary counts 
         summary_parts = []
-        if c.get('downloaded_image_count', 0) > 0:
-            summary_parts.append(f"📷 {c.get('downloaded_image_count')}")
         if c.get('cola_analysis_with_violations_count', 0) > 0:
             summary_parts.append(f"⚠️ {c.get('cola_analysis_with_violations_count')}")
         
@@ -779,7 +967,7 @@ def main():
         violations = c.get('violations', [])
         if violations:
             violation_lines = []
-            for violation in violations[:5]:  # Limit to first 5 violations
+            for violation in violations:
                 if violation.get('violation_comment'):
                     violation_text = f"• {highlight_term(violation.get('violation_comment'), search_term)}"
                     violation_lines.append(violation_text)
