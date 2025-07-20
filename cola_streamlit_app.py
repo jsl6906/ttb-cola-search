@@ -392,6 +392,15 @@ def main():
             selected_start, selected_end = date_range
         else:
             selected_start, selected_end = default_start, max_date
+        
+        # Add button to expand to full date range
+        if st.sidebar.button("📅 Show All Available Dates", help="Expand date range to include all COLA records"):
+            # Update query parameters to include full date range
+            st.query_params.update({
+                'start_date': min_date,
+                'end_date': max_date
+            })
+            st.rerun()
     else:
         selected_start, selected_end = None, None
 
@@ -465,17 +474,6 @@ def main():
     
     # Update query parameters (this creates a shareable URL)
     st.query_params.update(new_query_params)
-    
-    # Add share functionality in sidebar
-    st.sidebar.divider()
-    if st.sidebar.button("📋 Share Current Search", help="Get a shareable URL with current filter settings"):
-        if new_query_params:
-            from urllib.parse import quote
-            params_string = "&".join([f"{k}={quote(str(v))}" for k, v in new_query_params.items()])
-            st.sidebar.success("✅ Copy this URL to share current search filters:")
-            st.sidebar.code(f"?{params_string}", language="text")
-        else:
-            st.sidebar.info("ℹ️ No filters applied to share")
 
     # Build optimized query based on filters
     # Start with base COLA query using vw_colas for better performance
@@ -941,7 +939,12 @@ def main():
         # Add summary counts 
         summary_parts = []
         if c.get('cola_analysis_with_violations_count', 0) > 0:
-            summary_parts.append(f"⚠️ {c.get('cola_analysis_with_violations_count')}")
+            summary_parts.append(f"🤖 {c.get('cola_analysis_with_violations_count')}")
+        # Add indicator for COLA-level analysis completion (only if no violations to avoid redundancy)
+        elif c.get('cola_analysis_count', 0) > 0:
+            summary_parts.append("🤖 0")
+        else:
+            summary_parts.append("⏳ Pending LLM Review")
         
         if summary_parts:
             header_parts.append(' | '.join(summary_parts))
@@ -969,7 +972,22 @@ def main():
             violation_lines = []
             for violation in violations:
                 if violation.get('violation_comment'):
-                    violation_text = f"• {highlight_term(violation.get('violation_comment'), search_term)}"
+                    # Build prefix with available violation metadata
+                    prefix_parts = []
+                    if violation.get('cfr_ref'):
+                        prefix_parts.append(f"CFR {violation.get('cfr_ref')}")
+                    if violation.get('violation_type'):
+                        prefix_parts.append(violation.get('violation_type'))
+                    if violation.get('violation_group'):
+                        prefix_parts.append(violation.get('violation_group'))
+                    
+                    # Create the violation text with prefix if available
+                    if prefix_parts:
+                        prefix = f"[{' | '.join(prefix_parts)}] "
+                        violation_text = f"• {prefix}{highlight_term(violation.get('violation_comment'), search_term)}"
+                    else:
+                        violation_text = f"• {highlight_term(violation.get('violation_comment'), search_term)}"
+                    
                     violation_lines.append(violation_text)
             
             if len(violations) > 5:
