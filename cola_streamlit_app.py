@@ -349,8 +349,6 @@ def main():
     st.sidebar.header('Filters')
     search_term = st.sidebar.text_input('Search (ID, Brand, Analysis, etc.)', value=query_params.get('search', ''))
     exclude_term = st.sidebar.text_input('Exclude phrase (optional)', value=query_params.get('exclude', ''))
-    has_analysis_only = st.sidebar.checkbox('Only COLAs with image analysis data', value=query_params.get('analysis_only', 'false').lower() == 'true')
-    has_violations_only = st.sidebar.checkbox('Only COLAs with review warnings', value=query_params.get('violations_only', 'false').lower() == 'true')
 
     # Date range filter for completed_date
     min_date = con.execute('SELECT MIN(completed_date) from cola_images.colas WHERE completed_date IS NOT NULL').fetchone()[0]
@@ -392,15 +390,6 @@ def main():
             selected_start, selected_end = date_range
         else:
             selected_start, selected_end = default_start, max_date
-        
-        # Add button to expand to full date range
-        if st.sidebar.button("📅 Show All Available Dates", help="Expand date range to include all COLA records"):
-            # Update query parameters to include full date range
-            st.query_params.update({
-                'start_date': min_date,
-                'end_date': max_date
-            })
-            st.rerun()
     else:
         selected_start, selected_end = None, None
 
@@ -413,6 +402,10 @@ def main():
     # Query for brand options
     brand_options = [row[0] if row[0] else 'UNKNOWN' for row in con.execute("SELECT DISTINCT COALESCE(brand_name, 'UNKNOWN') from cola_images.colas WHERE brand_name IS NOT NULL AND TRIM(brand_name) != ''").fetchall()]
     brand_options = sorted(set(str(b) for b in brand_options))
+    
+    # Query for violation group options from violations
+    violation_group_options = [row[0] for row in con.execute("SELECT DISTINCT violation_group FROM cola_images.vw_cola_violations_list WHERE violation_group IS NOT NULL AND TRIM(violation_group) != '' ORDER BY violation_group").fetchall()]
+    violation_group_options = sorted(set(str(c) for c in violation_group_options))
     
     # Query for commodity options from cola_images.vw_colas with custom ordering
     commodity_data = con.execute("SELECT DISTINCT ct_commodity from cola_images.vw_colas WHERE ct_commodity IS NOT NULL").fetchall()
@@ -445,6 +438,7 @@ def main():
     selected_origin = st.sidebar.multiselect('Origin', origin_options, default=parse_url_list(query_params.get('origin', '')))
     selected_class_type = st.sidebar.multiselect('Class Type', class_type_options, default=parse_url_list(query_params.get('class_type', '')))
     selected_brand = st.sidebar.multiselect('Brand Name', brand_options, default=parse_url_list(query_params.get('brand', '')))
+    selected_violation_group = st.sidebar.multiselect('Violation Group (from review warnings)', violation_group_options, default=parse_url_list(query_params.get('violation_group', '')))
     
     # Convert display selections back to actual values
     selected_commodity = [commodity_value_map[display] for display in selected_commodity_display]
@@ -456,10 +450,6 @@ def main():
         new_query_params['search'] = search_term
     if exclude_term:
         new_query_params['exclude'] = exclude_term
-    if has_analysis_only:
-        new_query_params['analysis_only'] = 'true'
-    if has_violations_only:
-        new_query_params['violations_only'] = 'true'
     if selected_start and selected_end:
         new_query_params['start_date'] = str(selected_start)
         new_query_params['end_date'] = str(selected_end)
@@ -471,9 +461,32 @@ def main():
         new_query_params['class_type'] = ','.join(selected_class_type)
     if selected_brand:
         new_query_params['brand'] = ','.join(selected_brand)
+    if selected_violation_group:
+        new_query_params['violation_group'] = ','.join(selected_violation_group)
     
     # Update query parameters (this creates a shareable URL)
     st.query_params.update(new_query_params)
+
+    # Check if any non-date filters are active to show "Show All Available Dates" button
+    has_other_filters = bool(
+        search_term or 
+        exclude_term or 
+        selected_commodity or 
+        selected_origin or 
+        selected_class_type or 
+        selected_brand or 
+        selected_violation_group
+    )
+    
+    # Add button to expand to full date range only if other filters are active
+    if has_other_filters and min_date and max_date:
+        if st.sidebar.button("📅 Show All Available Dates", help="Expand date range to include all COLA records"):
+            # Update query parameters to include full date range
+            st.query_params.update({
+                'start_date': min_date,
+                'end_date': max_date
+            })
+            st.rerun()
 
     # Build optimized query based on filters
     # Start with base COLA query using vw_colas for better performance
@@ -507,15 +520,19 @@ def main():
         if selected_brand:
             where_clauses.append('COALESCE(c.brand_name, \'UNKNOWN\') IN (' + ','.join(['?' for _ in selected_brand]) + ')')
             params.extend(selected_brand)
+        if selected_violation_group:
+            # Filter COLAs that have violations with the selected violation groups
+            where_clauses.append('''
+                EXISTS (
+                    SELECT 1 FROM cola_images.vw_cola_violations_list v 
+                    WHERE v.cola_id = c.cola_id 
+                    AND v.violation_group IN (''' + ','.join(['?' for _ in selected_violation_group]) + ''')
+                )
+            ''')
+            params.extend(selected_violation_group)
         if selected_start and selected_end:
             where_clauses.append('completed_date BETWEEN ? AND ?')
             params.extend([str(selected_start), str(selected_end)])
-        
-        # Image-related filters using pre-computed counts from cola_images.vw_colas
-        if has_analysis_only:
-            where_clauses.append('c.image_analysis_count > 0')
-        if has_violations_only:
-            where_clauses.append('c.cola_analysis_with_violations_count > 0')
         
         # Handle search terms efficiently
         if search_term or exclude_term:
@@ -636,32 +653,32 @@ def main():
             except Exception:
                 images_data[row['cola_id']] = []
     
-    # Fetch violations data separately if needed
+    # Fetch violations data separately - always fetch when we have COLAs to ensure violations display properly
     violations_data = {}
-    if has_violations_only or search_term:
-        if cola_ids:
-            violations_query = """
-                SELECT 
-                    cola_id,
-                    json_group_array(
-                        json_object(
-                            'violation_comment', violation_comment,
-                            'violation_type', violation_type,
-                            'violation_group', violation_group,
-                            'violation_subgroup', violation_subgroup
-                        )
-                    ) AS violations_json
-                FROM cola_images.vw_cola_violations_list
-                WHERE cola_id IN (""" + ','.join(['?' for _ in cola_ids]) + """)
-                GROUP BY cola_id
-            """
-            
-            violations_df = con.execute(violations_query, cola_ids).fetchdf()
-            for _, row in violations_df.iterrows():
-                try:
-                    violations_data[row['cola_id']] = json.loads(row['violations_json'])
-                except Exception:
-                    violations_data[row['cola_id']] = []
+    if cola_ids:
+        violations_query = """
+            SELECT 
+                cola_id,
+                json_group_array(
+                    json_object(
+                        'violation_comment', violation_comment,
+                        'violation_type', violation_type,
+                        'violation_group', violation_group,
+                        'violation_subgroup', violation_subgroup,
+                        'cfr_ref', cfr_ref
+                    )
+                ) AS violations_json
+            FROM cola_images.vw_cola_violations_list
+            WHERE cola_id IN (""" + ','.join(['?' for _ in cola_ids]) + """)
+            GROUP BY cola_id
+        """
+        
+        violations_df = con.execute(violations_query, cola_ids).fetchdf()
+        for _, row in violations_df.iterrows():
+            try:
+                violations_data[row['cola_id']] = json.loads(row['violations_json'])
+            except Exception:
+                violations_data[row['cola_id']] = []
     
     # Combine data
     filtered = df.to_dict(orient='records')
@@ -734,6 +751,17 @@ def main():
             class_type_list = ', '.join(selected_class_type)
             filter_explanations.append(f"with Class Type = [{class_type_list}]")
     
+    # Violation Group filter explanation
+    if selected_violation_group:
+        if len(selected_violation_group) == 1:
+            filter_explanations.append(f"with {selected_violation_group[0]} violations")
+        else:
+            if len(selected_violation_group) == 2:
+                violation_text = ' and '.join(selected_violation_group)
+            else:
+                violation_text = ', '.join(selected_violation_group[:-1]) + ', and ' + selected_violation_group[-1]
+            filter_explanations.append(f"with {violation_text} violations")
+    
     # Search term explanation
     if search_term and not is_cola_list:
         filter_explanations.append(f"matching search term '{search_term}'")
@@ -746,13 +774,6 @@ def main():
     # Exclude term explanation
     if exclude_term:
         filter_explanations.append(f"excluding '{exclude_term}'")
-    
-    # Special filter explanations
-    if has_analysis_only:
-        filter_explanations.append("with image analysis data")
-    
-    if has_violations_only:
-        filter_explanations.append("with review warnings")
     
     # Build the results message with inline filter explanation
     results_message = f"Found {len(filtered):,} COLA records"
@@ -944,7 +965,7 @@ def main():
         elif c.get('cola_analysis_count', 0) > 0:
             summary_parts.append("🤖 0")
         else:
-            summary_parts.append("⏳ Pending LLM Review")
+            summary_parts.append("⏳ Pending Review")
         
         if summary_parts:
             header_parts.append(' | '.join(summary_parts))
@@ -1074,26 +1095,5 @@ def main():
         # Only keep the divider here
         st.divider()
 
-    # Sidebar footer with logo and text
-    st.sidebar.divider()
-    # oa_logo_path = os.path.join(os.path.dirname(__file__), '../../resources/oa_wordmark1.png')
-    # if os.path.exists(oa_logo_path):
-    #     left_co, cent_co, last_co = st.columns(3, gap="large")
-    #     with left_co:
-    #         st.write('    ')
-    #     with cent_co:
-    #         st.sidebar.image(oa_logo_path, use_container_width=False, width=110)
-    #     with last_co:
-    #         st.write('    ')
-    st.sidebar.markdown('<div style="font-size:0.95em; color:#444; text-align:center; margin-top:0.5em;">Prototype developed by the TTB Office of Analytics</div>', unsafe_allow_html=True)
-
 if __name__ == '__main__':
     main()
-
-# """
-# Good examples:
-
-# Bomb
-# FD&C
-# Pumpkin
-# """
