@@ -7,6 +7,8 @@ import random
 import pandas as pd
 from dotenv import load_dotenv
 import altair as alt
+from functools import lru_cache
+import hashlib
 
 # Load environment variables from .env file
 load_dotenv()
@@ -72,6 +74,174 @@ def get_motherduck_connection():
         st.info("• Check the MotherDuck console for database availability")
         
         st.stop()
+
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def get_cached_filter_options():
+    """
+    Cache frequently accessed filter options to reduce database load.
+    """
+    con = get_motherduck_connection()
+    
+    # Get all filter options in a single optimized query
+    filter_query = """
+    SELECT 
+        'origin' as filter_type,
+        COALESCE(origin, 'UNKNOWN') as value,
+        COUNT(*) as count
+    FROM cola_images.colas 
+    GROUP BY origin
+    
+    UNION ALL
+    
+    SELECT 
+        'class_type' as filter_type,
+        COALESCE(class_type, 'UNKNOWN') as value,
+        COUNT(*) as count
+    FROM cola_images.colas 
+    GROUP BY class_type
+    
+    UNION ALL
+    
+    SELECT 
+        'brand_name' as filter_type,
+        COALESCE(brand_name, 'UNKNOWN') as value,
+        COUNT(*) as count
+    FROM cola_images.colas 
+    WHERE brand_name IS NOT NULL AND TRIM(brand_name) != ''
+    GROUP BY brand_name
+    
+    UNION ALL
+    
+    SELECT 
+        'commodity' as filter_type,
+        ct_commodity as value,
+        COUNT(*) as count
+    FROM cola_images.vw_colas 
+    WHERE ct_commodity IS NOT NULL
+    GROUP BY ct_commodity
+    
+    UNION ALL
+    
+    SELECT 
+        'violation_group' as filter_type,
+        violation_group as value,
+        COUNT(*) as count
+    FROM cola_images.vw_cola_violations_list 
+    WHERE violation_group IS NOT NULL AND TRIM(violation_group) != ''
+    GROUP BY violation_group
+    """
+    
+    df = con.execute(filter_query).fetchdf()
+    
+    # Organize into dictionaries
+    options = {}
+    for filter_type in ['origin', 'class_type', 'brand_name', 'commodity', 'violation_group']:
+        subset = df[df['filter_type'] == filter_type]
+        options[filter_type] = sorted(subset['value'].tolist())
+    
+    return options
+
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def get_cached_date_range():
+    """
+    Cache the min/max date range to avoid repeated queries.
+    """
+    con = get_motherduck_connection()
+    result = con.execute('SELECT MIN(completed_date), MAX(completed_date) FROM cola_images.colas WHERE completed_date IS NOT NULL').fetchone()
+    return result[0], result[1]
+
+@lru_cache(maxsize=100)
+def generate_query_hash(*args):
+    """
+    Generate a hash for query parameters to enable caching.
+    """
+    content = str(args)
+    return hashlib.md5(content.encode()).hexdigest()
+
+@st.cache_data(ttl=600)  # Cache for 10 minutes
+def execute_main_query(query_hash, main_query, params):
+    """
+    Cache main query results based on query hash.
+    """
+    con = get_motherduck_connection()
+    return con.execute(main_query, params).fetchdf()
+
+@st.cache_data(ttl=600)  # Cache for 10 minutes  
+def get_bulk_images_and_violations(cola_ids_tuple):
+    """
+    Fetch images and violations data in bulk and cache results.
+    """
+    con = get_motherduck_connection()
+    cola_ids = list(cola_ids_tuple)  # Convert back from tuple
+    
+    images_data = {}
+    violations_data = {}
+    
+    if cola_ids:
+        # Optimized images query - single query for all data
+        images_query = """
+            SELECT 
+                ci.cola_id,
+                json_group_array(
+                    json_object(
+                        'public_url', ci.public_url,
+                        'img_type', ci.img_type,
+                        'file_name', ci.file_name,
+                        'dimensions_txt', ci.dimensions_txt,
+                        'analysis_items', COALESCE(
+                            (
+                                SELECT json_group_array(json_object(
+                                    'analysis_item_type', iai.analysis_item_type,
+                                    'text', iai.text,
+                                    'model_confidence', iai.model_confidence,
+                                    'bounding_box', iai.bounding_box
+                                ))
+                                from cola_images.image_analysis_items iai
+                                WHERE iai.cola_id = ci.cola_id AND iai.file_name = ci.file_name
+                            ), 
+                            '[]'
+                        )
+                    )
+                ) AS images_json
+            from cola_images.vw_cola_images ci
+            WHERE ci.cola_id IN (""" + ','.join(['?' for _ in cola_ids]) + """)
+            AND ci.public_url IS NOT NULL
+            GROUP BY ci.cola_id
+        """
+        
+        images_df = con.execute(images_query, cola_ids).fetchdf()
+        for _, row in images_df.iterrows():
+            try:
+                images_data[row['cola_id']] = json.loads(row['images_json'])
+            except Exception:
+                images_data[row['cola_id']] = []
+        
+        # Optimized violations query
+        violations_query = """
+            SELECT 
+                cola_id,
+                json_group_array(
+                    json_object(
+                        'violation_comment', violation_comment,
+                        'violation_type', violation_type,
+                        'violation_group', violation_group,
+                        'violation_subgroup', violation_subgroup,
+                        'cfr_ref', cfr_ref
+                    )
+                ) AS violations_json
+            FROM cola_images.vw_cola_violations_list
+            WHERE cola_id IN (""" + ','.join(['?' for _ in cola_ids]) + """)
+            GROUP BY cola_id
+        """
+        
+        violations_df = con.execute(violations_query, cola_ids).fetchdf()
+        for _, row in violations_df.iterrows():
+            try:
+                violations_data[row['cola_id']] = json.loads(row['violations_json'])
+            except Exception:
+                violations_data[row['cola_id']] = []
+    
+    return images_data, violations_data
 
 def get_commodity_icon(commodity):
     """
@@ -333,10 +503,7 @@ def main():
         st.logo(logo_path, size="large")
     st.title('TTB COLA Data Explorer')
 
-    # Connect to MotherDuck database
-    con = get_motherduck_connection()
-
-    # Load filters from URL parameters
+    # Load filters from URL parameters first and store in session state for consistency
     query_params = st.query_params
     
     # Helper function to parse comma-separated values from URL
@@ -345,14 +512,30 @@ def main():
             return [item.strip() for item in param_value.split(',') if item.strip()]
         return []
 
+    # Initialize session state for filters if not present to avoid reverting
+    if 'filters_initialized' not in st.session_state:
+        st.session_state.search_term = query_params.get('search', '')
+        st.session_state.exclude_term = query_params.get('exclude', '')
+        st.session_state.selected_commodity_url = parse_url_list(query_params.get('commodity', ''))
+        st.session_state.selected_origin_url = parse_url_list(query_params.get('origin', ''))
+        st.session_state.selected_class_type_url = parse_url_list(query_params.get('class_type', ''))
+        st.session_state.selected_brand_url = parse_url_list(query_params.get('brand', ''))
+        st.session_state.selected_violation_group_url = parse_url_list(query_params.get('violation_group', ''))
+        st.session_state.filters_initialized = True
+
     # Sidebar filters
     st.sidebar.header('Filters')
-    search_term = st.sidebar.text_input('Search (ID, Brand, Analysis, etc.)', value=query_params.get('search', ''))
-    exclude_term = st.sidebar.text_input('Exclude phrase (optional)', value=query_params.get('exclude', ''))
+    search_term = st.sidebar.text_input('Search (ID, Brand, Analysis, etc.)', value=st.session_state.search_term, key='search_input')
+    exclude_term = st.sidebar.text_input('Exclude phrase (optional)', value=st.session_state.exclude_term, key='exclude_input')
 
-    # Date range filter for completed_date
-    min_date = con.execute('SELECT MIN(completed_date) from cola_images.colas WHERE completed_date IS NOT NULL').fetchone()[0]
-    max_date = con.execute('SELECT MAX(completed_date) from cola_images.colas WHERE completed_date IS NOT NULL').fetchone()[0]
+    # Update session state when inputs change
+    if search_term != st.session_state.search_term:
+        st.session_state.search_term = search_term
+    if exclude_term != st.session_state.exclude_term:
+        st.session_state.exclude_term = exclude_term
+
+    # Use cached date range
+    min_date, max_date = get_cached_date_range()
     if min_date and max_date:
         min_date = min_date.strftime('%Y-%m-%d') if hasattr(min_date, 'strftime') else str(min_date)
         max_date = max_date.strftime('%Y-%m-%d') if hasattr(max_date, 'strftime') else str(max_date)
@@ -385,7 +568,7 @@ def main():
         else:
             default_date_range = (default_start, max_date)
         
-        date_range = st.sidebar.date_input('Completed Date Range', value=default_date_range, min_value=min_date, max_value=max_date)
+        date_range = st.sidebar.date_input('Completed Date Range', value=default_date_range, min_value=min_date, max_value=max_date, key='date_range_input')
         if isinstance(date_range, tuple) and len(date_range) == 2:
             selected_start, selected_end = date_range
         else:
@@ -393,23 +576,14 @@ def main():
     else:
         selected_start, selected_end = None, None
 
-    # Query DuckDB for unique origin and class type options
-    origin_options = [row[0] if row[0] else 'UNKNOWN' for row in con.execute("SELECT DISTINCT COALESCE(origin, 'UNKNOWN') from cola_images.colas").fetchall()]
-    origin_options = sorted(set(str(o) for o in origin_options))
-    class_type_options = [row[0] if row[0] else 'UNKNOWN' for row in con.execute("SELECT DISTINCT COALESCE(class_type, 'UNKNOWN') from cola_images.colas").fetchall()]
-    class_type_options = sorted(set(str(c) for c in class_type_options))
+    # Use cached filter options instead of querying database each time
+    filter_options = get_cached_filter_options()
     
-    # Query for brand options
-    brand_options = [row[0] if row[0] else 'UNKNOWN' for row in con.execute("SELECT DISTINCT COALESCE(brand_name, 'UNKNOWN') from cola_images.colas WHERE brand_name IS NOT NULL AND TRIM(brand_name) != ''").fetchall()]
-    brand_options = sorted(set(str(b) for b in brand_options))
-    
-    # Query for violation group options from violations
-    violation_group_options = [row[0] for row in con.execute("SELECT DISTINCT violation_group FROM cola_images.vw_cola_violations_list WHERE violation_group IS NOT NULL AND TRIM(violation_group) != '' ORDER BY violation_group").fetchall()]
-    violation_group_options = sorted(set(str(c) for c in violation_group_options))
-    
-    # Query for commodity options from cola_images.vw_colas with custom ordering
-    commodity_data = con.execute("SELECT DISTINCT ct_commodity from cola_images.vw_colas WHERE ct_commodity IS NOT NULL").fetchall()
-    commodity_options_raw = [row[0] for row in commodity_data]
+    origin_options = filter_options['origin']
+    class_type_options = filter_options['class_type']
+    brand_options = filter_options['brand_name']
+    violation_group_options = filter_options['violation_group']
+    commodity_options_raw = filter_options['commodity']
     
     # Custom order: Wine, Beer, Distilled Spirits, then others
     commodity_order = ['wine', 'beer', 'distilled_spirits']
@@ -434,16 +608,55 @@ def main():
         commodity_display_options.append(display_name)
         commodity_value_map[display_name] = commodity
     
-    selected_commodity_display = st.sidebar.multiselect('Commodity', commodity_display_options, default=[display for display in commodity_display_options if commodity_value_map[display] in parse_url_list(query_params.get('commodity', ''))])
-    selected_origin = st.sidebar.multiselect('Origin', origin_options, default=parse_url_list(query_params.get('origin', '')))
-    selected_class_type = st.sidebar.multiselect('Class Type', class_type_options, default=parse_url_list(query_params.get('class_type', '')))
-    selected_brand = st.sidebar.multiselect('Brand Name', brand_options, default=parse_url_list(query_params.get('brand', '')))
-    selected_violation_group = st.sidebar.multiselect('Violation Group (from review warnings)', violation_group_options, default=parse_url_list(query_params.get('violation_group', '')))
+    # Use session state for multiselect defaults to prevent reverting
+    selected_commodity_display = st.sidebar.multiselect(
+        'Commodity', 
+        commodity_display_options, 
+        default=[display for display in commodity_display_options if commodity_value_map[display] in st.session_state.selected_commodity_url],
+        key='commodity_select'
+    )
+    selected_origin = st.sidebar.multiselect(
+        'Origin', 
+        origin_options, 
+        default=st.session_state.selected_origin_url,
+        key='origin_select'
+    )
+    selected_class_type = st.sidebar.multiselect(
+        'Class Type', 
+        class_type_options, 
+        default=st.session_state.selected_class_type_url,
+        key='class_type_select'
+    )
+    selected_brand = st.sidebar.multiselect(
+        'Brand Name', 
+        brand_options, 
+        default=st.session_state.selected_brand_url,
+        key='brand_select'
+    )
+    selected_violation_group = st.sidebar.multiselect(
+        'Violation Group (from review warnings)', 
+        violation_group_options, 
+        default=st.session_state.selected_violation_group_url,
+        key='violation_group_select'
+    )
     
     # Convert display selections back to actual values
     selected_commodity = [commodity_value_map[display] for display in selected_commodity_display]
 
-    # Update URL parameters to reflect current filter state
+    # Update session state when multiselects change
+    current_commodity = [commodity_value_map[display] for display in selected_commodity_display]
+    if current_commodity != st.session_state.selected_commodity_url:
+        st.session_state.selected_commodity_url = current_commodity
+    if selected_origin != st.session_state.selected_origin_url:
+        st.session_state.selected_origin_url = selected_origin
+    if selected_class_type != st.session_state.selected_class_type_url:
+        st.session_state.selected_class_type_url = selected_class_type
+    if selected_brand != st.session_state.selected_brand_url:
+        st.session_state.selected_brand_url = selected_brand
+    if selected_violation_group != st.session_state.selected_violation_group_url:
+        st.session_state.selected_violation_group_url = selected_violation_group
+
+    # Update URL parameters to reflect current filter state (clear empty params)
     new_query_params = {}
     
     if search_term:
@@ -464,8 +677,10 @@ def main():
     if selected_violation_group:
         new_query_params['violation_group'] = ','.join(selected_violation_group)
     
-    # Update query parameters (this creates a shareable URL)
-    st.query_params.update(new_query_params)
+    # Clear the query params first, then update with new ones to remove deselected filters
+    st.query_params.clear()
+    if new_query_params:
+        st.query_params.update(new_query_params)
 
     # Check if any non-date filters are active to show "Show All Available Dates" button
     has_other_filters = bool(
@@ -606,79 +821,18 @@ def main():
     # Build final WHERE clause
     where_sql = ('WHERE ' + ' AND '.join(where_clauses)) if where_clauses else ''
     
-    # Execute main query
+    # Generate query hash for caching
+    query_hash = generate_query_hash(base_query, where_sql, tuple(params))
+    
+    # Execute main query with caching
     main_query = f"{base_query} {where_sql} ORDER BY completed_date DESC"
-    df = con.execute(main_query, params).fetchdf()
+    df = execute_main_query(query_hash, main_query, params)
     
     # Get the cola_ids for additional data fetching
-    cola_ids = df['cola_id'].tolist()
+    cola_ids_list = df['cola_id'].tolist()
     
-    # Fetch images data separately for better performance
-    images_data = {}
-    if cola_ids:
-        images_query = """
-            SELECT 
-                ci.cola_id,
-                json_group_array(
-                    json_object(
-                        'public_url', ci.public_url,
-                        'img_type', ci.img_type,
-                        'file_name', ci.file_name,
-                        'dimensions_txt', ci.dimensions_txt,
-                        'analysis_items', COALESCE(
-                            (
-                                SELECT json_group_array(json_object(
-                                    'analysis_item_type', iai.analysis_item_type,
-                                    'text', iai.text,
-                                    'model_confidence', iai.model_confidence,
-                                    'bounding_box', iai.bounding_box
-                                ))
-                                from cola_images.image_analysis_items iai
-                                WHERE iai.cola_id = ci.cola_id AND iai.file_name = ci.file_name
-                            ), 
-                            '[]'
-                        )
-                    )
-                ) AS images_json
-            from cola_images.vw_cola_images ci
-            WHERE ci.cola_id IN (""" + ','.join(['?' for _ in cola_ids]) + """)
-            AND ci.public_url IS NOT NULL
-            GROUP BY ci.cola_id
-        """
-        
-        images_df = con.execute(images_query, cola_ids).fetchdf()
-        for _, row in images_df.iterrows():
-            try:
-                images_data[row['cola_id']] = json.loads(row['images_json'])
-            except Exception:
-                images_data[row['cola_id']] = []
-    
-    # Fetch violations data separately - always fetch when we have COLAs to ensure violations display properly
-    violations_data = {}
-    if cola_ids:
-        violations_query = """
-            SELECT 
-                cola_id,
-                json_group_array(
-                    json_object(
-                        'violation_comment', violation_comment,
-                        'violation_type', violation_type,
-                        'violation_group', violation_group,
-                        'violation_subgroup', violation_subgroup,
-                        'cfr_ref', cfr_ref
-                    )
-                ) AS violations_json
-            FROM cola_images.vw_cola_violations_list
-            WHERE cola_id IN (""" + ','.join(['?' for _ in cola_ids]) + """)
-            GROUP BY cola_id
-        """
-        
-        violations_df = con.execute(violations_query, cola_ids).fetchdf()
-        for _, row in violations_df.iterrows():
-            try:
-                violations_data[row['cola_id']] = json.loads(row['violations_json'])
-            except Exception:
-                violations_data[row['cola_id']] = []
+    # Use bulk fetch with caching for images and violations
+    images_data, violations_data = get_bulk_images_and_violations(tuple(cola_ids_list))
     
     # Combine data
     filtered = df.to_dict(orient='records')
@@ -692,6 +846,29 @@ def main():
 
     # Add search explanation showing active filters
     filter_explanations = []
+    
+    # Add performance info in debug mode
+    if st.sidebar.checkbox("🔧 Show Performance Info", help="Display cache status and query performance metrics"):
+        perf_info = st.sidebar.expander("Performance Metrics", expanded=False)
+        with perf_info:
+            st.write(f"**Results:** {len(filtered):,} records")
+            st.write(f"**Cache Status:**")
+            st.write(f"• Filter options: Cached (TTL: 5min)")
+            st.write(f"• Date range: Cached (TTL: 1hr)")
+            st.write(f"• Main query: Hash {query_hash[:8]}... (TTL: 10min)")
+            st.write(f"• Images/violations: Bulk cached (TTL: 10min)")
+            st.write(f"**Database Load Reduction:**")
+            st.write("• Filter queries: ~5 queries → 1 cached query")
+            st.write("• Date range: ~2 queries → 1 cached query")
+            st.write("• Images/violations: Bulk fetch + cached")
+            
+            if st.button("🗑️ Clear All Caches", help="Force refresh all cached data"):
+                get_cached_filter_options.clear()
+                get_cached_date_range.clear()
+                execute_main_query.clear()
+                get_bulk_images_and_violations.clear()
+                st.success("All caches cleared! Page will refresh with fresh data.")
+                st.rerun()
     
     # Date range explanation
     if selected_start and selected_end:
@@ -830,13 +1007,17 @@ def main():
                 from datetime import date, datetime
                 if isinstance(selected_start, date):
                     start_date_obj = selected_start
+                elif isinstance(selected_start, str):
+                    start_date_obj = datetime.strptime(selected_start, '%Y-%m-%d').date()
                 else:
-                    start_date_obj = datetime.strptime(str(selected_start), '%Y-%m-%d').date()
+                    start_date_obj = selected_start
                 
                 if isinstance(selected_end, date):
                     end_date_obj = selected_end
+                elif isinstance(selected_end, str):
+                    end_date_obj = datetime.strptime(selected_end, '%Y-%m-%d').date()
                 else:
-                    end_date_obj = datetime.strptime(str(selected_end), '%Y-%m-%d').date()
+                    end_date_obj = selected_end
 
                 date_diff_days = (end_date_obj - start_date_obj).days
                 
@@ -1091,8 +1272,7 @@ def main():
                         details.append("<span style='color:#888'><i>No image analysis data found</i></span>")
                     
                     st.markdown('<div style="font-size:0.9em;line-height:1.1;margin:0.1em 0;">' + ' | '.join(details) + '</div>', unsafe_allow_html=True)
-        # Remove the old version of TTB Details and TTB Images links at the end of each COLA record
-        # Only keep the divider here
+
         st.divider()
 
 if __name__ == '__main__':
